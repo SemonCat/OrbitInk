@@ -64,13 +64,15 @@ bool readTocEntryFrom(F& file, BookMetadataCache::TocEntry& entry) {
 template <typename F>
 BookMetadataCache::SpineEntry readSpineEntryFrom(F& file) {
   BookMetadataCache::SpineEntry entry;
-  return readSpineEntryFrom(file, entry) ? entry : BookMetadataCache::SpineEntry{};
+  if (!readSpineEntryFrom(file, entry)) return {};
+  return entry;
 }
 
 template <typename F>
 BookMetadataCache::TocEntry readTocEntryFrom(F& file) {
   BookMetadataCache::TocEntry entry;
-  return readTocEntryFrom(file, entry) ? entry : BookMetadataCache::TocEntry{};
+  if (!readTocEntryFrom(file, entry)) return {};
+  return entry;
 }
 }  // namespace
 
