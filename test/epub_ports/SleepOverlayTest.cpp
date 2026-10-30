@@ -2,6 +2,8 @@
 #include <HalStorage.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
+
 #include "Epub/converters/DirectPixelWriter.h"
 #include "Epub/converters/PngScanline.h"
 #include "SleepOverlay.h"

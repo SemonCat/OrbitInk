@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <string>
 #include <cstring>
 
@@ -224,7 +225,7 @@ TEST(OtaManifest, NightlyIdentityIsSignedAndSameChannelCannotReplay) {
 }
 
 TEST(OtaChannel, MissingOrCorruptPreferenceDefaultsStable) {
-  for (const uint64_t value : {0ULL, 2ULL, 255ULL, 257ULL, UINT64_MAX}) {
+  for (const uint64_t value : std::array<uint64_t, 5>{0, 2, 255, 257, UINT64_MAX}) {
     EXPECT_EQ(ota_channel::normalizeSelection(value), 0);
     EXPECT_STREQ(ota_channel::selectedChannel(ota_channel::normalizeSelection(value)), "bookorbit-x3");
   }
