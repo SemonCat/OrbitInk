@@ -229,12 +229,14 @@ ProgressSyncRetry::Outcome synchronizeProgress(const std::string& epubPath, GfxR
   bool localLegacy = false;
   bool hasLocal = EpubReaderUtils::loadProgress(epub->getCachePath(), spineIndex, pageNumber, pageCount, localTimestamp,
                                                 localLegacy);
-  hasLocal = hasLocal && spineIndex >= 0 && spineIndex < epub->getSpineItemsCount() && pageNumber >= 0 &&
-             pageCount > 0 && pageNumber < pageCount;
+  const auto chapterProgress = hasLocal ? ProgressSyncPosition::chapterProgress(
+                                             {spineIndex, pageNumber, pageCount}, epub->getSpineItemsCount())
+                                       : std::nullopt;
+  hasLocal = chapterProgress.has_value();
   float localPercentage = 0.0f;
   SavedProgressPosition saved;
   if (hasLocal) {
-    localPercentage = epub->calculateProgress(spineIndex, static_cast<float>(pageNumber) / pageCount);
+    localPercentage = epub->calculateProgress(spineIndex, *chapterProgress);
     saved = ProgressSyncPosition::resolve(epub, CrossPointPosition{spineIndex, pageNumber, pageCount}, hash, renderer);
     if (!std::isfinite(localPercentage) || localPercentage < 0.0f || localPercentage > 1.0f || saved.xpath.empty()) {
       LOG_ERR("BOAuto", "Sync: invalid local progress; treating it as absent");
@@ -424,12 +426,14 @@ SyncNowResult syncNow(const std::string& epubPath, GfxRenderer& renderer, std::s
   bool localLegacy = false;
   bool hasLocal = EpubReaderUtils::loadProgress(epub->getCachePath(), spineIndex, pageNumber, pageCount, localTimestamp,
                                                 localLegacy);
-  hasLocal = hasLocal && spineIndex >= 0 && spineIndex < epub->getSpineItemsCount() && pageNumber >= 0 &&
-             pageCount > 0 && pageNumber < pageCount;
+  const auto chapterProgress = hasLocal ? ProgressSyncPosition::chapterProgress(
+                                             {spineIndex, pageNumber, pageCount}, epub->getSpineItemsCount())
+                                       : std::nullopt;
+  hasLocal = chapterProgress.has_value();
   float localPercentage = 0.0f;
   SavedProgressPosition saved;
   if (hasLocal) {
-    localPercentage = epub->calculateProgress(spineIndex, static_cast<float>(pageNumber) / pageCount);
+    localPercentage = epub->calculateProgress(spineIndex, *chapterProgress);
     saved = ProgressSyncPosition::resolve(epub, CrossPointPosition{spineIndex, pageNumber, pageCount}, hash, &renderer);
     if (!std::isfinite(localPercentage) || localPercentage < 0.0f || localPercentage > 1.0f || saved.xpath.empty()) {
       hasLocal = false;

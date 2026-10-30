@@ -323,6 +323,57 @@ TEST_F(StorageRepair, MetadataHotReadsAreCachedAndReloadInvalidatesThem) {
   EXPECT_EQ(cache.getSpineEntry(6).href, "updated6.xhtml");
 }
 
+TEST_F(StorageRepair, FailedSpineReadsRetryWithoutReloadingTheCache) {
+  const std::string path = "/cache/book.bin";
+  const size_t payload = 45;
+  const size_t hrefEnd = payload + 4 + std::string("chapter0.xhtml").size();
+  for (const size_t fault : {payload + 2, payload + 4, hrefEnd + 2, hrefEnd + 5}) {
+    HalStorage::registerTestFile(path, metadataFile(1));
+    BookMetadataCache cache("/cache");
+    ASSERT_TRUE(cache.load());
+    HalStorage::setReadFailure(path, fault);
+    EXPECT_TRUE(cache.getSpineEntry(0).href.empty());
+    HalStorage::setReadFailure(path, SIZE_MAX);
+    const auto entry = cache.getSpineEntry(0);
+    EXPECT_EQ(entry.href, "chapter0.xhtml");
+    EXPECT_EQ(entry.cumulativeSize, 100u);
+    EXPECT_EQ(entry.tocIndex, -1);
+    const auto reads = HalStorage::bytesRead(path);
+    EXPECT_EQ(cache.getSpineEntry(0).href, entry.href);
+    EXPECT_EQ(HalStorage::bytesRead(path), reads);
+  }
+}
+
+TEST_F(StorageRepair, FailedTocReadsRetryAndCompleteEmptyFieldsRemainCacheable) {
+  const std::string path = "/cache/book.bin";
+  auto bytes = metadataFile(0);
+  bytes[11] = 1;
+  u32(bytes, 45);
+  for (const std::string value : {"", "chapter0.xhtml", "anchor"}) {
+    u32(bytes, value.size());
+    bytes.insert(bytes.end(), value.begin(), value.end());
+  }
+  bytes.push_back(2);
+  u16(bytes, 0xFFFF);
+  for (const size_t fault : {47u, 51u, 55u, 70u, 73u, 78u, 79u}) {
+    HalStorage::registerTestFile(path, bytes);
+    BookMetadataCache cache("/cache");
+    ASSERT_TRUE(cache.load());
+    HalStorage::setReadFailure(path, fault);
+    EXPECT_TRUE(cache.getTocEntry(0).href.empty());
+    HalStorage::setReadFailure(path, SIZE_MAX);
+    const auto entry = cache.getTocEntry(0);
+    EXPECT_TRUE(entry.title.empty());
+    EXPECT_EQ(entry.href, "chapter0.xhtml");
+    EXPECT_EQ(entry.anchor, "anchor");
+    EXPECT_EQ(entry.level, 2);
+    EXPECT_EQ(entry.spineIndex, -1);
+    const auto reads = HalStorage::bytesRead(path);
+    EXPECT_EQ(cache.getTocEntry(0).anchor, entry.anchor);
+    EXPECT_EQ(HalStorage::bytesRead(path), reads);
+  }
+}
+
 TEST_F(StorageRepair, SharedMetadataCursorIsSafeAcrossConcurrentReaders) {
   HalStorage::registerTestFile("/cache/book.bin", metadataFile(300));
   BookMetadataCache cache("/cache");

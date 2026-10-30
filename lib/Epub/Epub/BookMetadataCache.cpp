@@ -47,22 +47,30 @@ uint32_t writeTocEntryTo(F& file, const BookMetadataCache::TocEntry& entry) {
 }
 
 template <typename F>
+bool readSpineEntryFrom(F& file, BookMetadataCache::SpineEntry& entry) {
+  return serialization::readString(file, entry.href) &&
+         file.read(&entry.cumulativeSize, sizeof(entry.cumulativeSize)) == sizeof(entry.cumulativeSize) &&
+         file.read(&entry.tocIndex, sizeof(entry.tocIndex)) == sizeof(entry.tocIndex);
+}
+
+template <typename F>
+bool readTocEntryFrom(F& file, BookMetadataCache::TocEntry& entry) {
+  return serialization::readString(file, entry.title) && serialization::readString(file, entry.href) &&
+         serialization::readString(file, entry.anchor) &&
+         file.read(&entry.level, sizeof(entry.level)) == sizeof(entry.level) &&
+         file.read(&entry.spineIndex, sizeof(entry.spineIndex)) == sizeof(entry.spineIndex);
+}
+
+template <typename F>
 BookMetadataCache::SpineEntry readSpineEntryFrom(F& file) {
   BookMetadataCache::SpineEntry entry;
-  if (!serialization::readString(file, entry.href) ||
-      file.read(&entry.cumulativeSize, sizeof(entry.cumulativeSize)) != sizeof(entry.cumulativeSize) ||
-      file.read(&entry.tocIndex, sizeof(entry.tocIndex)) != sizeof(entry.tocIndex)) return {};
-  return entry;
+  return readSpineEntryFrom(file, entry) ? entry : BookMetadataCache::SpineEntry{};
 }
 
 template <typename F>
 BookMetadataCache::TocEntry readTocEntryFrom(F& file) {
   BookMetadataCache::TocEntry entry;
-  if (!serialization::readString(file, entry.title) || !serialization::readString(file, entry.href) ||
-      !serialization::readString(file, entry.anchor) ||
-      file.read(&entry.level, sizeof(entry.level)) != sizeof(entry.level) ||
-      file.read(&entry.spineIndex, sizeof(entry.spineIndex)) != sizeof(entry.spineIndex)) return {};
-  return entry;
+  return readTocEntryFrom(file, entry) ? entry : BookMetadataCache::TocEntry{};
 }
 }  // namespace
 
@@ -523,7 +531,8 @@ int BookMetadataCache::resolveSpineHref(const std::string& target) {
   if (!bookFile.seek(lutOffset + sizeof(uint32_t) * (spineCount + tocCount))) return -1;
   serialization::BufferedFileReader reader(bookFile, BUILD_IO_BUFFER_SIZE);
   for (int i = 0; i < spineCount; ++i) {
-    const auto entry = readSpineEntryFrom(reader);
+    SpineEntry entry;
+    if (!readSpineEntryFrom(reader, entry)) return -1;
     if (entry.href == target || basename(entry.href) == filename) return i;
   }
   return -1;
@@ -556,7 +565,8 @@ BookMetadataCache::SpineEntry BookMetadataCache::getSpineEntry(const int index) 
       bookFile.read(&spineEntryPos, sizeof(spineEntryPos)) != sizeof(spineEntryPos) ||
       spineEntryPos < lutOffset + sizeof(uint32_t) * (spineCount + tocCount) ||
       spineEntryPos >= bookFile.size() || !bookFile.seek(spineEntryPos)) return {};
-  auto entry = readSpineEntry(bookFile);
+  SpineEntry entry;
+  if (!readSpineEntryFrom(bookFile, entry)) return {};
   cachedSpines[nextSpine] = {index, entry};
   nextSpine = (nextSpine + 1) % cachedSpines.size();
   return entry;
@@ -582,7 +592,8 @@ BookMetadataCache::TocEntry BookMetadataCache::getTocEntry(const int index) {
       bookFile.read(&tocEntryPos, sizeof(tocEntryPos)) != sizeof(tocEntryPos) ||
       tocEntryPos < lutOffset + sizeof(uint32_t) * (spineCount + tocCount) ||
       tocEntryPos >= bookFile.size() || !bookFile.seek(tocEntryPos)) return {};
-  auto entry = readTocEntry(bookFile);
+  TocEntry entry;
+  if (!readTocEntryFrom(bookFile, entry)) return {};
   cachedToc[nextToc] = {index, entry};
   nextToc = (nextToc + 1) % cachedToc.size();
   return entry;

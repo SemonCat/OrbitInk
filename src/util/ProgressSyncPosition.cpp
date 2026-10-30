@@ -9,6 +9,20 @@
 #include "AtomicFileReplace.h"
 
 namespace ProgressSyncPosition {
+namespace {
+constexpr int POSITION_CACHE_VERSION = 2;  // Previous version used the page-end paragraph boundary.
+}
+
+std::optional<float> chapterProgress(const CrossPointPosition& position, int spineCount) {
+  if (position.spineIndex < 0 || position.spineIndex >= spineCount || position.pageNumber < 0 ||
+      position.totalPages < 0) return std::nullopt;
+  if (position.totalPages == 0) {
+    return position.pageNumber == 0 ? std::optional<float>{0.0f} : std::nullopt;
+  }
+  if (position.pageNumber >= position.totalPages) return std::nullopt;
+  return static_cast<float>(position.pageNumber) / position.totalPages;
+}
+
 SavedProgressPosition resolve(const std::shared_ptr<Epub>& epub, CrossPointPosition position,
                                const std::string& binaryDocument, GfxRenderer* renderer) {
   const std::string path = epub->getCachePath() + "/sync_position.json";
@@ -31,7 +45,7 @@ SavedProgressPosition resolve(const std::shared_ptr<Epub>& epub, CrossPointPosit
     HalFile cached;
     if (Storage.openFileForRead("SyncPos", path, cached) && cached.size() <= 4096) {
       JsonDocument doc;
-      if (!deserializeJson(doc, cached) && doc["version"] == 1 && doc["key"].is<std::string>() &&
+      if (!deserializeJson(doc, cached) && doc["version"] == POSITION_CACHE_VERSION && doc["key"].is<std::string>() &&
           doc["key"].as<std::string>() == key && doc["xpath"].is<std::string>() && doc["percentage"].is<float>()) {
         SavedProgressPosition result{doc["xpath"].as<std::string>(), doc["percentage"].as<float>()};
         if (!result.xpath.empty() && result.xpath.size() <= 1024 && std::isfinite(result.percentage) &&
@@ -42,7 +56,7 @@ SavedProgressPosition resolve(const std::shared_ptr<Epub>& epub, CrossPointPosit
   if (renderer && position.pageNumber > 0) {
     Section section(epub, position.spineIndex, *renderer);
     if (section.getCachedPageCount() == position.totalPages) {
-      if (const auto paragraph = section.getParagraphIndexForPage(position.pageNumber)) {
+      if (const auto paragraph = section.getParagraphIndexForPage(position.pageNumber - 1)) {
         position.paragraphIndex = *paragraph;
         position.hasParagraphIndex = *paragraph > 0;
       }
@@ -52,7 +66,7 @@ SavedProgressPosition resolve(const std::shared_ptr<Epub>& epub, CrossPointPosit
   if (cacheable && !result.xpath.empty() && result.xpath.size() <= 1024 &&
       AtomicFileReplace::recover("SyncPos", path)) {
     JsonDocument doc;
-    doc["version"] = 1;
+    doc["version"] = POSITION_CACHE_VERSION;
     doc["key"] = key;
     doc["xpath"] = result.xpath;
     doc["percentage"] = result.percentage;

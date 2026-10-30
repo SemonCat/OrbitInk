@@ -168,12 +168,14 @@ ProgressSyncRetry::Outcome synchronizeProgress(const std::string& epubPath, GfxR
   bool localLegacy = false;
   bool hasLocal = EpubReaderUtils::loadProgress(epub->getCachePath(), spineIndex, pageNumber, pageCount,
                                                 localTimestamp, localLegacy);
-  hasLocal = hasLocal && spineIndex >= 0 && spineIndex < epub->getSpineItemsCount() && pageNumber >= 0 &&
-             pageCount > 0 && pageNumber < pageCount;
+  const auto chapterProgress = hasLocal ? ProgressSyncPosition::chapterProgress(
+                                             {spineIndex, pageNumber, pageCount}, epub->getSpineItemsCount())
+                                       : std::nullopt;
+  hasLocal = chapterProgress.has_value();
   float localPercentage = 0.0f;
   SavedProgressPosition saved;
   if (hasLocal) {
-    localPercentage = epub->calculateProgress(spineIndex, static_cast<float>(pageNumber) / pageCount);
+    localPercentage = epub->calculateProgress(spineIndex, *chapterProgress);
     const std::string binaryDocument =
         matchMethod == DocumentMatchMethod::FILENAME ? ProgressSyncNetwork::binaryDocument(epubPath) : hash;
     saved = ProgressSyncPosition::resolve(epub, CrossPointPosition{spineIndex, pageNumber, pageCount},
@@ -307,7 +309,7 @@ ProgressSyncRetry::Outcome synchronizeProgress(const std::string& epubPath, GfxR
   toPush.progress = saved.xpath;
   toPush.percentage = saved.percentage;
   toPush.device = SETTINGS.getEffectiveDeviceName();
-  if (KOREADER_STORE.usesCrossPointSyncServer()) {
+  if (KOREADER_STORE.usesCrossPointSyncServer() && pageCount > 0) {
     KOReaderRichPosition rich;
     rich.pctQ = static_cast<uint32_t>(saved.percentage * 1000000.0f + 0.5f);
     rich.spineIndex = static_cast<uint16_t>(spineIndex);

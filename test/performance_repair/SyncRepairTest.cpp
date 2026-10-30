@@ -1,10 +1,12 @@
 #include <gtest/gtest.h>
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include <CrossPointState.h>
 #include <GfxRenderer.h>
 #include <HalGPIO.h>
 #include <HalStorage.h>
 #include <KOReaderDocumentId.h>
+#include <ProgressPullPolicy.h>
 #include <WiFi.h>
 #include <activities/reader/EpubReaderUtils.h>
 
@@ -174,6 +176,91 @@ TEST_F(SyncRepair, ChapterStartUsesUnknownDenominatorWithoutLayoutAndKeepsChrono
   ASSERT_TRUE(ProgressSyncDeferred::stage(remote()));
   EXPECT_FALSE(ProgressSyncDeferred::applyForBook("/book.epub", renderer));
   EXPECT_FALSE(APP_STATE.deferredProgress.valid());
+}
+
+TEST_F(SyncRepair, UnknownChapterStartParticipatesInProviderTimestampOrderingWithoutXhtml) {
+  GfxRenderer renderer;
+  const auto candidate = remote(true);
+  ASSERT_TRUE(ProgressSyncDeferred::stage(candidate));
+  ASSERT_TRUE(ProgressSyncDeferred::applyForBook("/book.epub", renderer));
+  auto book = std::make_shared<Epub>("/book.epub", "/cache");
+  CrossPointPosition position{EpubReaderUtils::spine, EpubReaderUtils::page, EpubReaderUtils::pages};
+  const auto fraction = ProgressSyncPosition::chapterProgress(position, book->getSpineItemsCount());
+  ASSERT_TRUE(fraction.has_value());
+  EXPECT_EQ(*fraction, 0.0f);
+  const auto mapped = ProgressSyncPosition::resolve(book, position, candidate.document, &renderer);
+  EXPECT_EQ(mapped.xpath, candidate.xpath);
+  EXPECT_EQ(book->streamCalls(), 0);
+  EXPECT_EQ(book->calculateProgress(position.spineIndex, *fraction), mapped.percentage);
+  using namespace ProgressPullPolicy;
+  DecisionInput input{true, EpubReaderUtils::timestamp, RemoteState::Found, candidate.timestamp - 1};
+  EXPECT_EQ(decide(input), SyncAction::PushLocal);
+  input.remoteTimestamp = candidate.timestamp + 1;
+  EXPECT_EQ(decide(input), SyncAction::PullRemote);
+  input.remoteTimestamp = candidate.timestamp;
+  input.localSameAsRemote = true;
+  EXPECT_EQ(decide(input), SyncAction::AlreadySynced);
+  input.remoteState = RemoteState::Missing;
+  EXPECT_EQ(decide(input), SyncAction::PushLocal);
+  input.remoteState = RemoteState::Unavailable;
+  EXPECT_EQ(decide(input), SyncAction::Abort);
+}
+
+TEST_F(SyncRepair, LocalChapterFractionRejectsInvalidRecordsAndPreservesKnownDenominators) {
+  EXPECT_EQ(ProgressSyncPosition::chapterProgress({1, 4, 10}, 2), 0.4f);
+  EXPECT_EQ(ProgressSyncPosition::chapterProgress({1, 0, 0}, 2), 0.0f);
+  for (const CrossPointPosition invalid : {CrossPointPosition{-1, 0, 1}, {2, 0, 1}, {0, -1, 1},
+                                           {0, 0, -1}, {0, 1, 0}, {0, 10, 10}}) {
+    EXPECT_FALSE(ProgressSyncPosition::chapterProgress(invalid, 2).has_value());
+  }
+}
+
+TEST_F(SyncRepair, AutomaticMappingUsesTheSamePageStartBoundaryAsTheReader) {
+  GfxRenderer renderer;
+  auto book = std::make_shared<Epub>("/book.epub", "/cache");
+  Epub::defaultCachedPages = 2;
+  CrossPointPosition readerPosition{0, 1, 2};
+  // The LUT stores the paragraph at page completion; the preceding entry starts page 1.
+  readerPosition.paragraphIndex = 1;
+  readerPosition.hasParagraphIndex = true;
+  const auto expected = ProgressMapper::toSavedProgress(book, readerPosition);
+  const auto actual = ProgressSyncPosition::resolve(book, {0, 1, 2}, std::string(32, 'a'), &renderer);
+  ASSERT_NE(expected.xpath.find("/p[1]"), std::string::npos);
+  EXPECT_EQ(actual.xpath, expected.xpath);
+  EXPECT_EQ(actual.percentage, expected.percentage);
+  const auto streams = book->streamCalls();
+  EXPECT_EQ(ProgressSyncPosition::resolve(book, {0, 1, 2}, std::string(32, 'a'), &renderer).xpath, expected.xpath);
+  EXPECT_EQ(book->streamCalls(), streams);
+  HalFile cache;
+  ASSERT_TRUE(Storage.openFileForRead("Test", "/cache/sync_position.json", cache));
+  JsonDocument old;
+  ASSERT_FALSE(deserializeJson(old, cache));
+  cache.close();
+  old["version"] = 1;
+  old["xpath"] = "/body/DocFragment[1]/body/p[2]";
+  std::string stale;
+  serializeJson(old, stale);
+  HalStorage::registerTestFile("/cache/sync_position.json", {stale.begin(), stale.end()});
+  EXPECT_EQ(ProgressSyncPosition::resolve(book, {0, 1, 2}, std::string(32, 'a'), &renderer).xpath, expected.xpath);
+  EXPECT_GT(book->streamCalls(), streams);
+}
+
+TEST(SyncReaderContract, EveryProviderEntryUsesSharedLocalPositionValidation) {
+  for (const std::string path : {"/src/util/KOReaderAutoSync.cpp", "/src/util/BookOrbitAutoSync.cpp"}) {
+    std::ifstream file(std::string(REPO_ROOT) + path);
+    const std::string source((std::istreambuf_iterator<char>(file)), {});
+    size_t count = 0;
+    size_t offset = 0;
+    while ((offset = source.find("ProgressSyncPosition::chapterProgress(", offset)) != std::string::npos) {
+      ++count;
+      ++offset;
+    }
+    EXPECT_EQ(count, path.find("KOReader") != std::string::npos ? 1u : 2u);
+    EXPECT_EQ(source.find("static_cast<float>(pageNumber) / pageCount"), std::string::npos);
+    if (path.find("KOReader") != std::string::npos) {
+      EXPECT_NE(source.find("usesCrossPointSyncServer() && pageCount > 0"), std::string::npos);
+    }
+  }
 }
 
 TEST_F(SyncRepair, RichChapterStartIgnoresIncompatibleCachedDenominator) {
