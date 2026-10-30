@@ -134,6 +134,10 @@ std::vector<LibraryScanner::Entry> LibraryScanner::scanAllBooks(const std::strin
       resultBytes += entryBytes;
       result.push_back(Entry{std::move(path), info.size, info.fatDateTime});
     }
+    if (result.size() >= maxBooks) {
+      truncated = true;
+      break;
+    }
 
     // Push in reverse so the worklist (a LIFO stack) still visits subfolders in
     // ascending name order.

@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <CrossPointState.h>
+#include <Epub/SectionMetadata.h>
 #include <GfxRenderer.h>
 #include <HalGPIO.h>
 #include <HalStorage.h>
@@ -10,7 +11,9 @@
 #include <WiFi.h>
 #include <activities/reader/EpubReaderUtils.h>
 
+#include <cstring>
 #include <fstream>
+#include <limits>
 #include <sstream>
 
 #include "ProgressSyncDeferred.h"
@@ -46,32 +49,48 @@ class SyncRepair : public testing::Test {
     progress.timestamp = 1800000000;
     return progress;
   }
+  static void finalizedSection(int spine = 0) {
+    constexpr uint16_t count = 2;
+    constexpr uint32_t lutOffset = 128;
+    std::vector<uint8_t> bytes(lutOffset + sizeof(count) * (count + 1), 0);
+    bytes[0] = sectionmetadata::FILE_VERSION;
+    std::memcpy(bytes.data() + sectionmetadata::HEADER_SIZE - sizeof(uint32_t) * 4 - sizeof(count), &count, sizeof(count));
+    std::memcpy(bytes.data() + sectionmetadata::HEADER_SIZE - sizeof(uint32_t) * 2, &lutOffset, sizeof(lutOffset));
+    std::memcpy(bytes.data() + lutOffset, &count, sizeof(count));
+    for (uint16_t i = 0; i < count; ++i) {
+      const uint16_t paragraph = i + 1;
+      std::memcpy(bytes.data() + lutOffset + sizeof(count) * (i + 1), &paragraph, sizeof(paragraph));
+    }
+    HalStorage::registerTestFile("/cache/sections/" + std::to_string(spine) + ".bin", std::move(bytes));
+  }
 };
 
 TEST_F(SyncRepair, SharedPositionCacheInvalidatesIdentityPageDenominatorAndLayout) {
   auto book = std::make_shared<Epub>("/book.epub", "/cache");
   const CrossPointPosition position{1, 4, 10};
-  HalStorage::registerTestFile("/cache/sections/1.bin", std::vector<uint8_t>(64, 1));
+  finalizedSection(1);
   const std::string identity(32, 'a');
-  const auto first = ProgressSyncPosition::resolve(book, position, identity, nullptr);
+  const auto first = ProgressSyncPosition::resolve(book, position, identity);
   ASSERT_FALSE(first.xpath.empty());
   ASSERT_GT(book->streamCalls(), 0);
   const int streams = book->streamCalls();
-  const auto warm = ProgressSyncPosition::resolve(book, position, identity, nullptr);
+  const auto warm = ProgressSyncPosition::resolve(book, position, identity);
   EXPECT_EQ(warm.xpath, first.xpath);
   EXPECT_NEAR(warm.percentage, first.percentage, 0.000001f);  // JSON's serialized decimal precision.
   EXPECT_EQ(book->streamCalls(), streams);
-  ProgressSyncPosition::resolve(book, position, std::string(32, 'b'), nullptr);
+  ProgressSyncPosition::resolve(book, position, std::string(32, 'b'));
   EXPECT_GT(book->streamCalls(), streams);
   int previous = book->streamCalls();
-  ProgressSyncPosition::resolve(book, {1, 5, 10}, std::string(32, 'b'), nullptr);
+  ProgressSyncPosition::resolve(book, {1, 5, 10}, std::string(32, 'b'));
   EXPECT_GT(book->streamCalls(), previous);
   previous = book->streamCalls();
-  ProgressSyncPosition::resolve(book, {1, 5, 20}, std::string(32, 'b'), nullptr);
+  ProgressSyncPosition::resolve(book, {1, 5, 20}, std::string(32, 'b'));
   EXPECT_GT(book->streamCalls(), previous);
   previous = book->streamCalls();
-  HalStorage::registerTestFile("/cache/sections/1.bin", std::vector<uint8_t>(64, 2));
-  ProgressSyncPosition::resolve(book, {1, 5, 20}, std::string(32, 'b'), nullptr);
+  auto changedLayout = HalStorage::readTestFile("/cache/sections/1.bin");
+  changedLayout[1] = 42;  // Different font ID, same finalized page-count metadata.
+  HalStorage::registerTestFile("/cache/sections/1.bin", std::move(changedLayout));
+  ProgressSyncPosition::resolve(book, {1, 5, 20}, std::string(32, 'b'));
   EXPECT_GT(book->streamCalls(), previous);
 }
 
@@ -79,12 +98,12 @@ TEST_F(SyncRepair, TornPositionFileFallsBackAndUnverifiedTempNeverBecomesLive) {
   auto book = std::make_shared<Epub>("/book.epub", "/cache");
   HalStorage::registerTestFile("/cache/sync_position.json", {'{'});
   HalStorage::registerTestFile("/cache/sync_position.json.tmp", {'{', '}'});
-  const auto position = ProgressSyncPosition::resolve(book, {1, 2, 10}, std::string(32, 'a'), nullptr);
+  const auto position = ProgressSyncPosition::resolve(book, {1, 2, 10}, std::string(32, 'a'));
   EXPECT_FALSE(position.xpath.empty());
   EXPECT_GT(book->streamCalls(), 0);
   EXPECT_FALSE(Storage.exists("/cache/sync_position.json.tmp"));
   const auto streams = book->streamCalls();
-  ProgressSyncPosition::resolve(book, {1, 2, 10}, std::string(32, 'a'), nullptr);
+  ProgressSyncPosition::resolve(book, {1, 2, 10}, std::string(32, 'a'));
   EXPECT_EQ(book->streamCalls(), streams);
 }
 
@@ -188,7 +207,7 @@ TEST_F(SyncRepair, UnknownChapterStartParticipatesInProviderTimestampOrderingWit
   const auto fraction = ProgressSyncPosition::chapterProgress(position, book->getSpineItemsCount());
   ASSERT_TRUE(fraction.has_value());
   EXPECT_EQ(*fraction, 0.0f);
-  const auto mapped = ProgressSyncPosition::resolve(book, position, candidate.document, &renderer);
+  const auto mapped = ProgressSyncPosition::resolve(book, position, candidate.document);
   EXPECT_EQ(mapped.xpath, candidate.xpath);
   EXPECT_EQ(book->streamCalls(), 0);
   EXPECT_EQ(book->calculateProgress(position.spineIndex, *fraction), mapped.percentage);
@@ -216,33 +235,99 @@ TEST_F(SyncRepair, LocalChapterFractionRejectsInvalidRecordsAndPreservesKnownDen
 }
 
 TEST_F(SyncRepair, AutomaticMappingUsesTheSamePageStartBoundaryAsTheReader) {
-  GfxRenderer renderer;
   auto book = std::make_shared<Epub>("/book.epub", "/cache");
   Epub::defaultCachedPages = 2;
+  finalizedSection();
   CrossPointPosition readerPosition{0, 1, 2};
   // The LUT stores the paragraph at page completion; the preceding entry starts page 1.
   readerPosition.paragraphIndex = 1;
   readerPosition.hasParagraphIndex = true;
   const auto expected = ProgressMapper::toSavedProgress(book, readerPosition);
-  const auto actual = ProgressSyncPosition::resolve(book, {0, 1, 2}, std::string(32, 'a'), &renderer);
+  const auto actual = ProgressSyncPosition::resolve(book, {0, 1, 2}, std::string(32, 'a'));
   ASSERT_NE(expected.xpath.find("/p[1]"), std::string::npos);
   EXPECT_EQ(actual.xpath, expected.xpath);
   EXPECT_EQ(actual.percentage, expected.percentage);
   const auto streams = book->streamCalls();
-  EXPECT_EQ(ProgressSyncPosition::resolve(book, {0, 1, 2}, std::string(32, 'a'), &renderer).xpath, expected.xpath);
+  EXPECT_EQ(ProgressSyncPosition::resolve(book, {0, 1, 2}, std::string(32, 'a')).xpath, expected.xpath);
   EXPECT_EQ(book->streamCalls(), streams);
   HalFile cache;
   ASSERT_TRUE(Storage.openFileForRead("Test", "/cache/sync_position.json", cache));
   JsonDocument old;
   ASSERT_FALSE(deserializeJson(old, cache));
   cache.close();
-  old["version"] = 1;
-  old["xpath"] = "/body/DocFragment[1]/body/p[2]";
-  std::string stale;
-  serializeJson(old, stale);
-  HalStorage::registerTestFile("/cache/sync_position.json", {stale.begin(), stale.end()});
-  EXPECT_EQ(ProgressSyncPosition::resolve(book, {0, 1, 2}, std::string(32, 'a'), &renderer).xpath, expected.xpath);
-  EXPECT_GT(book->streamCalls(), streams);
+  for (int version : {1, 2}) {
+    old["version"] = version;
+    old["xpath"] = "/body/DocFragment[1]/body/p[2]";
+    std::string stale;
+    serializeJson(old, stale);
+    HalStorage::registerTestFile("/cache/sync_position.json", {stale.begin(), stale.end()});
+    EXPECT_EQ(ProgressSyncPosition::resolve(book, {0, 1, 2}, std::string(32, 'a')).xpath, expected.xpath);
+    EXPECT_GT(book->streamCalls(), streams);
+  }
+}
+
+TEST_F(SyncRepair, HeadlessCacheMissCannotReplaceTheReadersParagraphBoundary) {
+  auto book = std::make_shared<Epub>("/book.epub", "/cache");
+  Epub::defaultCachedPages = 2;
+  finalizedSection();
+  CrossPointPosition readerPosition{0, 1, 2};
+  readerPosition.paragraphIndex = 1;
+  readerPosition.hasParagraphIndex = true;
+  const auto expected = ProgressMapper::toSavedProgress(book, readerPosition);
+  const auto headless = ProgressSyncPosition::resolve(book, {0, 1, 2}, std::string(32, 'a'));
+  EXPECT_EQ(headless.xpath, expected.xpath);
+  const auto streams = book->streamCalls();
+  EXPECT_EQ(ProgressSyncPosition::resolve(book, {0, 1, 2}, std::string(32, 'a')).xpath, expected.xpath);
+  EXPECT_EQ(book->streamCalls(), streams);
+}
+
+TEST_F(SyncRepair, FailedParagraphMetadataReadRetriesBeforeCachingTheAnchor) {
+  auto book = std::make_shared<Epub>("/book.epub", "/cache");
+  for (const size_t failAt : {size_t{19}, size_t{128}}) {
+    SCOPED_TRACE(failAt);
+    finalizedSection();
+    Storage.remove("/cache/sync_position.json");
+    HalStorage::setReadFailure("/cache/sections/0.bin", failAt);
+    const auto writes = HalStorage::writeOpenAttempts("/cache/sync_position.json.tmp");
+    const auto coarse = ProgressSyncPosition::resolve(book, {0, 1, 2}, std::string(32, 'a'));
+    EXPECT_NE(coarse.xpath.find("/p[2]"), std::string::npos);
+    EXPECT_EQ(HalStorage::writeOpenAttempts("/cache/sync_position.json.tmp"), writes);
+    const auto streams = book->streamCalls();
+    HalStorage::setReadFailure("/cache/sections/0.bin", std::numeric_limits<size_t>::max());
+    const auto repaired = ProgressSyncPosition::resolve(book, {0, 1, 2}, std::string(32, 'a'));
+    EXPECT_NE(repaired.xpath.find("/p[1]"), std::string::npos);
+    EXPECT_GT(book->streamCalls(), streams);
+    const auto warmStreams = book->streamCalls();
+    EXPECT_EQ(ProgressSyncPosition::resolve(book, {0, 1, 2}, std::string(32, 'a')).xpath, repaired.xpath);
+    EXPECT_EQ(book->streamCalls(), warmStreams);
+  }
+}
+
+TEST_F(SyncRepair, SectionMetadataValidatesFinalizationBoundsAndIoFailures) {
+  finalizedSection();
+  auto file = Storage.open("/cache/sections/0.bin");
+  EXPECT_EQ(sectionmetadata::pageCount(file), 2);
+  EXPECT_EQ(sectionmetadata::paragraphIndexForPage(file, 0), 1);
+  EXPECT_EQ(sectionmetadata::paragraphIndexForPage(file, 1), 2);
+  EXPECT_FALSE(sectionmetadata::paragraphIndexForPage(file, 2));
+  HalStorage::setReadFailure("/cache/sections/0.bin", 128);
+  EXPECT_FALSE(sectionmetadata::paragraphIndexForPage(file, 0));
+  HalStorage::setReadFailure("/cache/sections/0.bin", std::numeric_limits<size_t>::max());
+  HalStorage::setSeekFailure("/cache/sections/0.bin", true);
+  EXPECT_FALSE(sectionmetadata::pageCount(file));
+  EXPECT_FALSE(sectionmetadata::paragraphIndexForPage(file, 0));
+  for (const uint8_t version : {uint8_t{0}, uint8_t{0xFE - (sectionmetadata::FILE_VERSION - 28)}}) {
+    auto bytes = HalStorage::readTestFile("/cache/sections/0.bin");
+    bytes[0] = version;
+    HalStorage::registerTestFile("/cache/sections/0.bin", std::move(bytes));
+    auto incomplete = Storage.open("/cache/sections/0.bin");
+    EXPECT_FALSE(sectionmetadata::pageCount(incomplete));
+  }
+  auto bytes = HalStorage::readTestFile("/cache/sections/0.bin");
+  bytes.resize(sectionmetadata::HEADER_SIZE + 1);
+  HalStorage::registerTestFile("/cache/sections/0.bin", std::move(bytes));
+  auto truncated = Storage.open("/cache/sections/0.bin");
+  EXPECT_FALSE(sectionmetadata::paragraphIndexForPage(truncated, 0));
 }
 
 TEST(SyncReaderContract, EveryProviderEntryUsesSharedLocalPositionValidation) {

@@ -675,6 +675,37 @@ TEST(SdCardFontMeasurement, SaturationStillCachesLaterCjkParagraphs) {
   EXPECT_EQ(font.getStats().overflowLoads, 0u);
 }
 
+TEST(SdCardFontMeasurement, SaturatedCacheKeepsCurrentHitsAlongsideNewGlyphs) {
+  for (const uint32_t newCount : {1u, 384u}) {
+    SCOPED_TRACE(newCount);
+    HalStorage::resetTestFiles();
+    ESP.freeHeap = ESP.maxAllocHeap = 0xFFFFFFFFu;
+    std::vector<uint32_t> cps;
+    std::string first;
+    std::string mixed;
+    for (uint32_t i = 0; i < 768 + newCount; ++i) {
+      const uint32_t cp = 0x4E00 + i;
+      cps.push_back(cp);
+      if (i < 768) utf8AppendCodepoint(cp, first);
+      if (i >= (newCount == 1 ? 767u : 384u)) utf8AppendCodepoint(cp, mixed);
+    }
+    HalStorage::registerTestFile(TEST_PATH, buildCpfont(cps));
+    SdCardFont font;
+    ASSERT_TRUE(font.load(TEST_PATH));
+    ASSERT_EQ(font.buildAdvanceTable(first.c_str(), 1), 0);
+    ASSERT_EQ(font.buildAdvanceTable(mixed.c_str(), 1), 0);
+    HalStorage::resetReadCount();
+    for (int repeat = 0; repeat < 3; ++repeat) {
+      ASSERT_EQ(font.buildAdvanceTable(mixed.c_str(), 1), 0);
+      for (uint32_t i = newCount == 1 ? 767u : 384u; i < cps.size(); ++i) {
+        EXPECT_EQ(font.measureAdvance(cps[i], 0), 16);
+      }
+    }
+    EXPECT_EQ(HalStorage::readCount(), 0u);
+    EXPECT_EQ(font.getStats().overflowLoads, 0u);
+  }
+}
+
 TEST(SdCardFontMeasurement, ColdMetricFallbackReadsNoBitmapAndRetainsNoMiniArena) {
   HalStorage::resetTestFiles();
   HalStorage::registerTestFile(TEST_PATH, buildMinimalTwoGlyphCpfont());

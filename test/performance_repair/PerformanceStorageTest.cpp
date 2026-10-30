@@ -251,6 +251,19 @@ TEST_F(StorageRepair, RealScannerRetainsBoundedNaturalPrefixOfHugeDirectory) {
   EXPECT_TRUE(stats.capped);
 }
 
+TEST_F(StorageRepair, ScannerStopsBeforeOpeningMoreDirectoriesAtTheBookCap) {
+  HalStorage::registerTestFile("/book.epub", {});
+  HalStorage::registerTestFile("/later/another.epub", {});
+  HalStorage::registerTestDirectory("/later", {"/later/another.epub"});
+  HalStorage::registerTestDirectory("/", {"/later", "/book.epub"});
+  LibraryScanner::ScanStats stats;
+  const auto books = LibraryScanner::scanAllBooks("/", 1, false, &stats);
+  ASSERT_EQ(books.size(), 1u);
+  EXPECT_EQ(books.front().path, "/book.epub");
+  EXPECT_EQ(HalStorage::readOpenAttempts("/later"), 0u);
+  EXPECT_TRUE(stats.capped);
+}
+
 TEST_F(StorageRepair, LongNameAndWideTreeScansRespectAllBudgets) {
   std::vector<std::string> dirs;
   for (int i = 0; i < 400; ++i) {

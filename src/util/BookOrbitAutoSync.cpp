@@ -237,7 +237,7 @@ ProgressSyncRetry::Outcome synchronizeProgress(const std::string& epubPath, GfxR
   SavedProgressPosition saved;
   if (hasLocal) {
     localPercentage = epub->calculateProgress(spineIndex, *chapterProgress);
-    saved = ProgressSyncPosition::resolve(epub, CrossPointPosition{spineIndex, pageNumber, pageCount}, hash, renderer);
+    saved = ProgressSyncPosition::resolve(epub, CrossPointPosition{spineIndex, pageNumber, pageCount}, hash);
     if (!std::isfinite(localPercentage) || localPercentage < 0.0f || localPercentage > 1.0f || saved.xpath.empty()) {
       LOG_ERR("BOAuto", "Sync: invalid local progress; treating it as absent");
       hasLocal = false;
@@ -434,7 +434,7 @@ SyncNowResult syncNow(const std::string& epubPath, GfxRenderer& renderer, std::s
   SavedProgressPosition saved;
   if (hasLocal) {
     localPercentage = epub->calculateProgress(spineIndex, *chapterProgress);
-    saved = ProgressSyncPosition::resolve(epub, CrossPointPosition{spineIndex, pageNumber, pageCount}, hash, &renderer);
+    saved = ProgressSyncPosition::resolve(epub, CrossPointPosition{spineIndex, pageNumber, pageCount}, hash);
     if (!std::isfinite(localPercentage) || localPercentage < 0.0f || localPercentage > 1.0f || saved.xpath.empty()) {
       hasLocal = false;
       localPercentage = 0.0f;

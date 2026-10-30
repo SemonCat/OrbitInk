@@ -179,7 +179,7 @@ ProgressSyncRetry::Outcome synchronizeProgress(const std::string& epubPath, GfxR
     const std::string binaryDocument =
         matchMethod == DocumentMatchMethod::FILENAME ? ProgressSyncNetwork::binaryDocument(epubPath) : hash;
     saved = ProgressSyncPosition::resolve(epub, CrossPointPosition{spineIndex, pageNumber, pageCount},
-                                           binaryDocument, renderer);
+                                           binaryDocument);
     if (!std::isfinite(localPercentage) || localPercentage < 0.0f || localPercentage > 1.0f || saved.xpath.empty()) {
       LOG_ERR("KOAuto", "Sync: invalid local progress; treating it as absent");
       hasLocal = false;

@@ -1464,12 +1464,12 @@ bool SdCardFont::advanceTableLookup(uint8_t styleIdx, uint32_t codepoint, uint16
   return false;
 }
 
-void SdCardFont::mergeIntoAdvanceTable(uint8_t styleIdx, const AdvanceEntry* sortedNew, uint32_t newCount) {
+void SdCardFont::mergeIntoAdvanceTable(uint8_t styleIdx, const AdvanceEntry* sortedNew, uint32_t newCount,
+                                      const uint32_t* sortedRequested, uint32_t requestedCount) {
   if (newCount == 0) return;
   const uint32_t oldSize = advanceTableSize_[styleIdx];
   // Make room for the current request even after earlier chapters filled the cache.
   newCount = std::min(newCount, ADVANCE_CACHE_LIMIT);
-  const uint32_t keepOld = std::min(oldSize, ADVANCE_CACHE_LIMIT - newCount);
   uint32_t mergedCap = oldSize + newCount;
   if (mergedCap > ADVANCE_CACHE_LIMIT) mergedCap = ADVANCE_CACHE_LIMIT;
 
@@ -1479,16 +1479,23 @@ void SdCardFont::mergeIntoAdvanceTable(uint8_t styleIdx, const AdvanceEntry* sor
     return;
   }
 
-  const AdvanceEntry* a = advanceTable_[styleIdx];
-  const AdvanceEntry* b = sortedNew;
-  uint32_t i = 0, j = 0, k = 0;
-  while (k < mergedCap && (i < keepOld || j < newCount)) {
-    if (i < keepOld && (j >= newCount || a[i].codepoint <= b[j].codepoint)) {
-      merged[k++] = a[i++];
-    } else {
-      merged[k++] = b[j++];
+  std::copy_n(sortedNew, newCount, merged);
+  uint32_t k = newCount;
+  const AdvanceEntry* old = advanceTable_[styleIdx];
+  // Protect current hits before retaining unrelated earlier chapters. Otherwise
+  // an identical mixed hit/miss request can keep evicting its own glyphs.
+  for (uint32_t i = 0; i < oldSize && k < mergedCap; ++i) {
+    if (std::binary_search(sortedRequested, sortedRequested + requestedCount, old[i].codepoint)) {
+      merged[k++] = old[i];
     }
   }
+  for (uint32_t i = 0; i < oldSize && k < mergedCap; ++i) {
+    if (!std::binary_search(sortedRequested, sortedRequested + requestedCount, old[i].codepoint)) {
+      merged[k++] = old[i];
+    }
+  }
+  std::sort(merged, merged + k,
+            [](const AdvanceEntry& a, const AdvanceEntry& b) { return a.codepoint < b.codepoint; });
 
   delete[] advanceTable_[styleIdx];
   advanceTable_[styleIdx] = merged;
@@ -1642,7 +1649,7 @@ int SdCardFont::fetchAdvancesForCodepoints(uint32_t* codepoints, uint32_t cpCoun
       // Sort staged by codepoint, then merge into the persistent table.
       std::sort(staged.get(), staged.get() + fetched,
                 [](const AdvanceEntry& a, const AdvanceEntry& b) { return a.codepoint < b.codepoint; });
-      mergeIntoAdvanceTable(si, staged.get(), fetched);
+      mergeIntoAdvanceTable(si, staged.get(), fetched, codepoints, cpCount);
     }
 
     LOG_DBG("SDCF", "Advance table style %u: +%u from SD, total=%u/%u", si, fetched, advanceTableSize_[si],

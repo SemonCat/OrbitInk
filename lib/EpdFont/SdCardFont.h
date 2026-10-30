@@ -303,8 +303,9 @@ class SdCardFont {
   uint32_t advanceTableSize_[MAX_STYLES] = {};
   bool advanceTableLookup(uint8_t styleIdx, uint32_t codepoint, uint16_t* outAdvance) const;
   // Merge sortedNew (sorted by codepoint, no overlap with existing) into the
-  // advance table for styleIdx, preserving sort order and preferring new entries.
-  void mergeIntoAdvanceTable(uint8_t styleIdx, const AdvanceEntry* sortedNew, uint32_t newCount);
+  // advance table, preferring this request's new entries and existing hits.
+  void mergeIntoAdvanceTable(uint8_t styleIdx, const AdvanceEntry* sortedNew, uint32_t newCount,
+                             const uint32_t* sortedRequested, uint32_t requestedCount);
 
   Stats stats_;
   uint32_t contentHash_ = 0;

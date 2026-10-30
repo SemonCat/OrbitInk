@@ -1,7 +1,7 @@
 #include "ProgressSyncPosition.h"
 
 #include <ArduinoJson.h>
-#include <Epub/Section.h>
+#include <Epub/SectionMetadata.h>
 #include <HalStorage.h>
 
 #include <cmath>
@@ -10,7 +10,7 @@
 
 namespace ProgressSyncPosition {
 namespace {
-constexpr int POSITION_CACHE_VERSION = 2;  // Previous version used the page-end paragraph boundary.
+constexpr int POSITION_CACHE_VERSION = 3;  // Previous versions could retain unenriched headless positions.
 }
 
 std::optional<float> chapterProgress(const CrossPointPosition& position, int spineCount) {
@@ -24,7 +24,7 @@ std::optional<float> chapterProgress(const CrossPointPosition& position, int spi
 }
 
 SavedProgressPosition resolve(const std::shared_ptr<Epub>& epub, CrossPointPosition position,
-                               const std::string& binaryDocument, GfxRenderer* renderer) {
+                               const std::string& binaryDocument) {
   const std::string path = epub->getCachePath() + "/sync_position.json";
   uint32_t layout = 2166136261U;
   HalFile sectionFile;
@@ -40,7 +40,7 @@ SavedProgressPosition resolve(const std::shared_ptr<Epub>& epub, CrossPointPosit
   const std::string key = binaryDocument + ":" + std::to_string(position.spineIndex) + ":" +
                           std::to_string(position.pageNumber) + ":" + std::to_string(position.totalPages) + ":" +
                           std::to_string(layout);
-  const bool cacheable = binaryDocument.size() == 32;
+  bool cacheable = binaryDocument.size() == 32;
   if (cacheable && AtomicFileReplace::recover("SyncPos", path)) {
     HalFile cached;
     if (Storage.openFileForRead("SyncPos", path, cached) && cached.size() <= 4096) {
@@ -53,12 +53,16 @@ SavedProgressPosition resolve(const std::shared_ptr<Epub>& epub, CrossPointPosit
       }
     }
   }
-  if (renderer && position.pageNumber > 0) {
-    Section section(epub, position.spineIndex, *renderer);
-    if (section.getCachedPageCount() == position.totalPages) {
-      if (const auto paragraph = section.getParagraphIndexForPage(position.pageNumber - 1)) {
+  if (sectionFile && position.pageNumber > 0) {
+    const auto cachedPages = sectionmetadata::pageCount(sectionFile);
+    if (!cachedPages) {
+      cacheable = false;
+    } else if (*cachedPages == position.totalPages) {
+      if (const auto paragraph = sectionmetadata::paragraphIndexForPage(sectionFile, position.pageNumber - 1)) {
         position.paragraphIndex = *paragraph;
         position.hasParagraphIndex = *paragraph > 0;
+      } else {
+        cacheable = false;  // Retry incomplete/transient LUT reads rather than persisting a coarse anchor.
       }
     }
   }

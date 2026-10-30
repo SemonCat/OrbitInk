@@ -7,6 +7,7 @@
 
 #include "Epub/css/CssParser.h"
 #include "Page.h"
+#include "SectionMetadata.h"
 #include "hyphenation/Hyphenator.h"
 #include "parsers/ChapterHtmlSlimParser.h"
 
@@ -21,7 +22,7 @@ namespace {
 //      (lazy extraction: images are header-probed at build time and extracted on
 //      first render).
 // v34: Long footnote hrefs and 1.6.0 paragraph/ruby/table layout fixes.
-constexpr uint8_t SECTION_FILE_VERSION = 34;
+constexpr uint8_t SECTION_FILE_VERSION = sectionmetadata::FILE_VERSION;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects
@@ -39,10 +40,7 @@ constexpr uint8_t SECTION_FILE_INCOMPLETE_VERSION = 0;
 // only fails (noisily, via the block-decode error path) when a page is loaded.
 // Derived so the pairing can't be forgotten: 0xFE for v28, 0xFD for v29, ...
 constexpr uint8_t SECTION_FILE_PARTIAL_VERSION = 0xFE - (SECTION_FILE_VERSION - 28);
-constexpr uint32_t HEADER_SIZE = sizeof(uint8_t) + sizeof(int) + sizeof(float) + sizeof(bool) + sizeof(uint8_t) +
-                                 sizeof(uint16_t) + sizeof(uint16_t) + sizeof(uint16_t) + sizeof(bool) + sizeof(bool) +
-                                 sizeof(uint8_t) + sizeof(bool) + sizeof(uint32_t) + sizeof(uint32_t) +
-                                 sizeof(uint32_t) + sizeof(uint32_t);
+constexpr uint32_t HEADER_SIZE = sectionmetadata::HEADER_SIZE;
 }  // namespace
 
 // Out-of-line so the unique_ptr<ChapterHtmlSlimParser> in BuildContext can be
@@ -765,24 +763,10 @@ std::optional<uint16_t> Section::getCachedPageCount() const {
     return std::nullopt;
   }
 
-  const uint32_t fileSize = f.size();
-  if (fileSize < HEADER_SIZE) {
-    return std::nullopt;
-  }
-
   // Only a finalized section's count is the chapter total; a partial's count is just the
   // suspended build's watermark, which would skew progress mapping. Callers fall back to
   // their own estimates.
-  uint8_t version;
-  serialization::readPod(f, version);
-  if (version != SECTION_FILE_VERSION) {
-    return std::nullopt;
-  }
-
-  f.seek(HEADER_SIZE - sizeof(uint32_t) * 4 - sizeof(uint16_t));
-  uint16_t count;
-  serialization::readPod(f, count);
-  return count;
+  return sectionmetadata::pageCount(f);
 }
 
 std::optional<uint16_t> Section::getPageForAnchor(const std::string& anchor) const {
@@ -860,30 +844,7 @@ std::optional<uint16_t> Section::getParagraphIndexForPage(const uint16_t page) c
     return std::nullopt;
   }
 
-  const uint32_t fileSize = f.size();
-  f.seek(HEADER_SIZE - sizeof(uint32_t) * 2);
-  uint32_t paragraphLutOffset;
-  serialization::readPod(f, paragraphLutOffset);
-  if (paragraphLutOffset == 0 || paragraphLutOffset >= fileSize) {
-    return std::nullopt;
-  }
-
-  f.seek(paragraphLutOffset);
-  uint16_t count;
-  serialization::readPod(f, count);
-  if (count == 0 || page >= count) {
-    return std::nullopt;
-  }
-
-  const uint32_t entryEnd = paragraphLutOffset + sizeof(uint16_t) + (page + 1) * sizeof(uint16_t);
-  if (entryEnd > fileSize) {
-    return std::nullopt;
-  }
-
-  f.seek(paragraphLutOffset + sizeof(uint16_t) + page * sizeof(uint16_t));
-  uint16_t pIdx;
-  serialization::readPod(f, pIdx);
-  return pIdx;
+  return sectionmetadata::paragraphIndexForPage(f, page);
 }
 
 std::optional<uint16_t> Section::getPageForListItemIndex(const uint16_t liIndex) const {
