@@ -1,0 +1,104 @@
+name: OrbitInk channels
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      channel:
+        type: choice
+        options: [nightly, stable]
+        default: nightly
+      version:
+        description: Stable only - exact committed runtime version (owner release request)
+        type: string
+      confirm:
+        description: Stable only - type RELEASE
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.repository == 'SemonCat/OrbitInk' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    outputs:
+      channel: ${{ steps.configure.outputs.channel }}
+      build: ${{ steps.configure.outputs.build }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install platformio==6.1.18 -r requirements.txt
+      - id: configure
+        env:
+          CHANNEL: ${{ inputs.channel || 'nightly' }}
+          VERSION: ${{ inputs.version }}
+          CONFIRM: ${{ inputs.confirm }}
+        run: python scripts/orbitink_ci.py configure --channel "$CHANNEL" --version "$VERSION" --confirm "$CONFIRM"
+      - name: Python and host regression tests
+        run: |
+          python -m unittest discover -s scripts -p 'test_*ota*.py'
+          python -m unittest discover -s scripts -p 'test_release*.py'
+          python -m unittest discover -s scripts -p 'test_orbitink*.py'
+          cmake -S test -B /tmp/orbitink-host
+          cmake --build /tmp/orbitink-host -j 2
+          ctest --test-dir /tmp/orbitink-host --output-on-failure
+      - name: Seed pinned platform and dependencies (no signing key)
+        run: pio pkg install -e x3_zh_tw_custom
+      - name: Guarded Linux build and matching source capture
+        env:
+          CHANNEL: ${{ steps.configure.outputs.channel }}
+          BUILD: ${{ steps.configure.outputs.build }}
+        run: |
+          python scripts/release_x3_zh_tw.py --cold
+          python scripts/orbitink_ci.py stage --channel "$CHANNEL" --build "$BUILD"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: unsigned-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist/ci/
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # Build every main push. Serialize publication; superseded builds cannot regress pointers.
+    concurrency:
+      group: orbitink-channels
+      cancel-in-progress: false
+    # Parent must restrict these environments to protected main. Stable requires owner approval.
+    environment: ${{ needs.build.outputs.channel == 'stable' && 'orbitink-stable' || 'orbitink-nightly' }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: unsigned-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist/ci/
+      - name: Sign with existing key and assemble firmware-only delivery
+        env:
+          OTA_SIGNING_KEY_PEM: ${{ secrets.OTA_SIGNING_KEY_PEM }}
+          CHANNEL: ${{ needs.build.outputs.channel }}
+          BUILD: ${{ needs.build.outputs.build }}
+        run: python scripts/orbitink_ci.py package --channel "$CHANNEL" --build "$BUILD"
+      - name: Publish allocated channel
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ needs.build.outputs.channel }}
+          BUILD: ${{ needs.build.outputs.build }}
+        run: python scripts/orbitink_ci.py publish --channel "$CHANNEL" --build "$BUILD"

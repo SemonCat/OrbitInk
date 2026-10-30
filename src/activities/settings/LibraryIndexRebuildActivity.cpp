@@ -1,0 +1,259 @@
+#include "LibraryIndexRebuildActivity.h"
+
+#include <GfxRenderer.h>
+#include <I18n.h>
+
+#include <string>
+
+#include "CrossPointSettings.h"
+#include "MappedInputManager.h"
+#include "components/UITheme.h"
+#include "fontIds.h"
+#include "util/CoverGridGeometry.h"
+
+namespace {
+constexpr uint32_t PROGRESS_MIN_INTERVAL_MS = 1000;
+constexpr int PROGRESS_MIN_PERCENT_STEP = 5;
+
+std::string formatSeconds(const uint32_t ms) {
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%.1fs", ms / 1000.0f);
+  return buf;
+}
+}  // namespace
+
+void LibraryIndexRebuildActivity::onEnter() {
+  Activity::onEnter();
+
+  if (isAutoMode()) {
+    // Skip the confirm dialog -- this was triggered by entering a grouped Covers/Titles view
+    // with a stale index, not by the user asking to rebuild something.
+    beginBuild();
+    return;
+  }
+
+  state = WARNING;
+  const char* options[] = {tr(STR_CANCEL), tr(STR_REBUILD_BUTTON)};
+  confirmPopup.show(tr(STR_REBUILD_LIBRARY_INDEX), options, 2, 0, [this](const int idx) {
+    if (idx == 1) {
+      beginBuild();
+    } else {
+      finishOrContinue();
+    }
+  });
+  requestUpdate();
+}
+
+void LibraryIndexRebuildActivity::onExit() { Activity::onExit(); }
+
+void LibraryIndexRebuildActivity::finishOrContinue() {
+  if (onDone) {
+    onDone();
+  } else {
+    finish();
+  }
+}
+
+void LibraryIndexRebuildActivity::beginBuild() {
+  // Only pre-render covers for the view that will actually show them -- Titles view never draws
+  // one, so a Titles-only user shouldn't pay for cover generation during their rebuild. Computed
+  // live off the running renderer/theme/settings (see CoverGridGeometry), never hardcoded, so a
+  // pre-rendered thumbnail always matches exactly what CoverGridBrowserActivity will look up on
+  // this device.
+  int coverWidth = 0;
+  int coverHeight = 0;
+  if (SETTINGS.fileBrowserView == CrossPointSettings::FILE_BROWSER_COVERS) {
+    const CoverGridGeometry::Geometry g = CoverGridGeometry::compute(renderer);
+    coverWidth = g.coverWidth;
+    coverHeight = g.coverHeight;
+  }
+
+  // The delta scan itself (LibraryScanner's directory walk + a fingerprint compare, no OPF/XTC
+  // parsing) runs before any popup: it's cheap enough that showing "Building..." unconditionally
+  // first -- as this used to do -- meant every single auto-triggered entry into a grouped
+  // Covers/Titles view flashed the popup even when nothing had changed and zero parsing was about
+  // to happen. Only show it once begin() has actually found real work.
+  builder.begin(coverWidth, coverHeight);
+  metadataCommitted = false;
+  if (builder.upToDate()) {
+    // Up to date costs nothing to detect -- auto mode continues immediately rather than showing a
+    // screen for the common case where there was never anything to wait for. Manual mode still
+    // shows it: the user explicitly asked to rebuild and deserves to know nothing needed to happen.
+    if (isAutoMode()) {
+      finishOrContinue();
+      return;
+    }
+    state = UP_TO_DATE;
+    requestUpdate();
+    return;
+  }
+
+  state = BUILDING;
+  popupShown = false;
+  lastPopupUpdateMs = 0;
+  lastPopupPercent = -1;
+  requestUpdate();
+}
+
+void LibraryIndexRebuildActivity::maybeRequestProgressUpdate() {
+  // Combined across both phases (pending-book metadata + cover backfill) from the start, rather
+  // than resetting to 0% when the cover phase begins -- both totals are already known after
+  // begin(), so the bar just keeps advancing smoothly through the whole build.
+  const int total = builder.totalCount() + builder.totalCoverCount();
+  const int resolved = builder.resolvedCount() + builder.resolvedCoverCount();
+  const int percent = total > 0 ? (resolved * 100 / total) : 100;
+  const uint32_t nowMs = millis();
+  const bool timeElapsed = (nowMs - lastPopupUpdateMs) >= PROGRESS_MIN_INTERVAL_MS;
+  const bool percentAdvanced = (percent - lastPopupPercent) >= PROGRESS_MIN_PERCENT_STEP;
+  if (lastPopupPercent < 0 || (timeElapsed && percentAdvanced)) {
+    lastPopupUpdateMs = nowMs;
+    lastPopupPercent = percent;
+    requestUpdate();
+  }
+}
+
+void LibraryIndexRebuildActivity::loop() {
+  if (state == WARNING) {
+    if (confirmPopup.handleInput(mappedInput, [this] { requestUpdate(); })) return;
+    if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
+      finishOrContinue();
+    }
+    return;
+  }
+
+  if (state == BUILDING) {
+    // isPressed(), not wasPressed(): builder.step() blocks for hundreds of ms per book, so
+    // gpio.update() (the only thing that samples the raw button state) only runs about once per
+    // step() -- a quick tap-and-release can land entirely inside that gap and never register as
+    // an edge. A held press is still caught because isPressed() reflects whatever the debounced
+    // state was at the last sample, not a one-shot event that resets before the next check.
+    if (mappedInput.isPressed(MappedInputManager::Button::Back)) {
+      // Once metadata is committed, the pending-book phase's work is already safely on disk --
+      // only cover backfill (if any) remains, and abandoning it is harmless: whatever's still
+      // missing simply gets picked up again, cheaply, on a future rebuild's carriedOver scan.
+      if (!metadataCommitted) {
+        builder.cancel();
+      }
+      // Auto mode continues immediately (see beginBuild()'s up-to-date case for the same
+      // reasoning) -- the destination view falls back to ungrouped rendering on its own when no
+      // valid index exists, so there's nothing further this screen needs to communicate.
+      if (isAutoMode()) {
+        finishOrContinue();
+        return;
+      }
+      state = CANCELLED;
+      requestUpdate();
+      return;
+    }
+    if (builder.hasWork()) {
+      builder.step();
+      maybeRequestProgressUpdate();
+      return;
+    }
+    if (!metadataCommitted) {
+      const bool ok = builder.commit();
+      metadataCommitted = true;
+      if (!ok) {
+        if (isAutoMode()) {
+          finishOrContinue();
+          return;
+        }
+        state = FAILED;
+        requestUpdate();
+        return;
+      }
+    }
+    // Cover backfill: entries carried over unchanged (so never touched by step() above) that
+    // begin() found missing a thumbnail at the current grid size -- see LibraryIndexBuilder's
+    // class comment. Empty whenever beginBuild() didn't request cover work (Titles view).
+    if (builder.hasCoverWork()) {
+      builder.stepCover();
+      maybeRequestProgressUpdate();
+      return;
+    }
+    if (isAutoMode()) {
+      finishOrContinue();
+      return;
+    }
+    state = SUCCESS;
+    requestUpdate();
+    return;
+  }
+
+  // UP_TO_DATE, SUCCESS, CANCELLED, FAILED are all terminal (manual mode only -- auto mode never
+  // reaches here, see above): any input dismisses.
+  int x = 0;
+  int y = 0;
+  if (mappedInput.wasPressed(MappedInputManager::Button::Back) || mappedInput.wasScreenTapped(x, y)) {
+    finishOrContinue();
+  }
+}
+
+void LibraryIndexRebuildActivity::render(RenderLock&&) {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const auto pageWidth = renderer.getScreenWidth();
+  const auto pageHeight = renderer.getScreenHeight();
+
+  if (state == BUILDING) {
+    // Compose the header once; afterward only the popup's own progress bar refreshes (via
+    // fillPopupProgress below), matching CoverGridBrowserActivity::ensurePageLoaded()'s
+    // throttled-popup convention -- not a full-page redraw per progress step.
+    if (!popupShown) {
+      // No page header here (unlike every other state below): this can be auto-triggered while
+      // entering Covers/Titles, and "Rebuild Library Index" as a page title would look like a
+      // navigation mistake in that context. The popup text alone explains what's happening.
+      renderer.clearScreen();
+      popupRect = GUI.drawPopup(renderer, tr(STR_BUILDING_LIBRARY_INDEX));
+      popupShown = true;
+      // Drawn once here, not per progress tick -- matches the header above, and the hint text
+      // itself never changes. isPressed() (see loop()) needs a genuine hold, not a tap.
+      const auto labels = mappedInput.mapLabels(tr(STR_HOLD_TO_CANCEL), "", "", "");
+      GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+      // Skip the progress bar on this first frame purely to keep the popup's own first paint to a
+      // single small draw call (fillPopupProgress redraws a sub-rect of what drawPopup just drew,
+      // so combining them here would just repaint the same pixels twice for no visible benefit).
+      // The next render draws it -- builder.begin() has already run by this point (see
+      // beginBuild()), so totalCount()/resolvedCount() are meaningful from the very first tick.
+      return;
+    }
+    const int total = builder.totalCount() + builder.totalCoverCount();
+    const int percent = total > 0 ? ((builder.resolvedCount() + builder.resolvedCoverCount()) * 100 / total) : 100;
+    GUI.fillPopupProgress(renderer, popupRect, percent);
+    return;
+  }
+
+  renderer.clearScreen();
+  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_REBUILD_LIBRARY_INDEX));
+
+  if (state == WARNING) {
+    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 20, tr(STR_REBUILD_LIBRARY_INDEX_WARNING));
+
+    if (confirmPopup.processRender(renderer, mappedInput)) return;
+
+    const auto labels = mappedInput.mapLabels(tr(STR_CANCEL), tr(STR_REBUILD_BUTTON), "", "");
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    renderer.displayBuffer();
+    return;
+  }
+
+  if (state == UP_TO_DATE) {
+    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, tr(STR_LIBRARY_INDEX_UP_TO_DATE), true,
+                              EpdFontFamily::BOLD);
+  } else if (state == SUCCESS) {
+    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 20, tr(STR_LIBRARY_INDEX_BUILT), true,
+                              EpdFontFamily::BOLD);
+    const std::string resultText = std::to_string(builder.totalEntries()) + " " + std::string(tr(STR_BOOKS_INDEXED)) +
+                                   ", " + formatSeconds(builder.elapsedMs());
+    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 10, resultText.c_str());
+  } else if (state == CANCELLED) {
+    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, tr(STR_LIBRARY_INDEX_CANCELLED));
+  } else if (state == FAILED) {
+    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 20, tr(STR_LIBRARY_INDEX_FAILED), true,
+                              EpdFontFamily::BOLD);
+    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 10, tr(STR_CHECK_SERIAL_OUTPUT));
+  }
+
+  const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
+  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  renderer.displayBuffer();
+}

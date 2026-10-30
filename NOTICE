@@ -1,0 +1,59 @@
+OrbitInk - BookOrbit firmware for Xteink X3
+
+OrbitInk continues CrossFade and its CrossPoint ancestry. This source tree also merges
+CrossInk v1.6.1 (9914146eeae7b46b300f475a16c32426fc02ec1f) through merge
+a9898b6c85acfa7e5dbda9ebe255d3f23571afeb. CrossInk is licensed under MIT;
+retain the upstream copyright notices in individual source files.
+OrbitInk's original changes use the root MIT terms. Linked dependencies retain their
+own licenses: in particular, the root MIT license does not override wolfSSL's
+COPYING/LICENSING terms. OrbitInk distributes the combined linked firmware under
+GNU GPL version 3, exercising wolfSSL's "GPLv2 or any later version" option to
+accommodate the linked Apache-2.0 components. See LICENSES/COPYING.GPL3.
+Individual source files retain their original MIT, Apache, LGPL, font and other
+notices; this does not relabel all source files as GPL-only. Binary releases
+include matching corresponding source and actual component notices.
+Optional SD Chinese fonts are not distributed.
+
+CrossFade
+Copyright (c) 2026 Chuckthe5th
+
+This product is a fork of CrossPoint (https://github.com/crosspoint-reader/crosspoint-reader),
+Copyright (c) 2025 Dave Allie, licensed under the MIT License (see LICENSE).
+
+The EPUB reader menu's icon tab-bar layout (see
+src/activities/reader/EpubReaderMenuActivity.h/.cpp: drawIconTabBar/tabSlotRect) is adapted from
+CrossInk (https://github.com/uxjulia/CrossInk), also a fork of CrossPoint, licensed under the MIT
+License. Navigation is CrossFade's own existing tab+list button scheme (see SettingsActivity).
+
+The Lyra Carousel home theme (src/components/themes/lyra/LyraCarouselTheme.h/.cpp) is a functional
+port of CrossInk's Lyra Carousel theme (https://github.com/uxjulia/CrossInk), also a fork of
+CrossPoint, licensed under the MIT License, including its two-tier cover sizing, bidirectional
+(both-axis) cover cropping, and title/dot/progress-bar layout, solved against this fork's own
+screen dimensions rather than CrossInk's literal pixel constants. Adapted rather than copied
+wholesale -- see that file's own header comment for what differs (no frame-cache pre-rendering, no
+reading-stats text, CrossFade's own menu icon assets) and why.
+
+GfxRenderer::drawPerspectiveBitmap (lib/GfxRenderer/GfxRenderer.h/.cpp), the trapezoid-warped
+bitmap primitive behind Lyra Carousel's receding side covers, and the side-cover proportions that
+use it, are ported from CrossInk's own GfxRenderer and LyraCarouselTheme
+(https://github.com/uxjulia/CrossInk), also a fork of CrossPoint, licensed under the MIT License --
+adapted to this fork's own row-buffer allocation pattern (malloc/free per call, matching this
+file's existing drawBitmap, rather than CrossInk's pooled scratch allocator, which this fork
+doesn't have); the per-column perspective math itself is unchanged.
+
+The Reading Dashboard home theme (src/components/themes/dashboard/DashboardTheme.h/.cpp and
+src/components/themes/dashboard/DashboardLayout.h) adapts the home-screen visual language of YACP's
+Dashboard theme (https://github.com/Sichroteph/YACP, commit
+a96da864647ddc23a28431582ad722a67ca689ba, src/components/themes/dashboard/DashboardTheme.cpp), also
+a fork of CrossPoint, licensed under the MIT License: the single rounded primary reading card, the
+inverted "Continue Reading" pill, the round icon tile, the rounded panel of caption-over-value stat
+pairs, the full-width rounded action rows, and the rounded empty-state action pill. Adapted rather
+than ported -- see that file's own header comment for what is deliberately left behind (YACP's
+branding and logo, its reading-stats schema and the seven-row statistics column, its progress bar
+and percentage, reader-type icons, sleep screen, and cover pipeline) and why. The layout arithmetic
+is solved against this fork's own screen dimensions and measured font metrics, the card is sized to
+its content rather than to a fixed frame, the book-selection semantics (pinned default, ephemeral
+browse) are CrossFade's own, and the theme reuses CrossFade's existing home action builder, routes
+and icon assets.
+
+CrossFade modifications are likewise released under the MIT License.

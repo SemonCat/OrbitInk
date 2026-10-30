@@ -1,0 +1,192 @@
+#pragma once
+
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#include <freertos/task.h>
+
+#include <atomic>
+#include <cassert>
+#include <functional>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "GfxRenderer.h"
+#include "MappedInputManager.h"
+#include "util/ScreenshotInfo.h"
+
+class Activity;    // forward declaration
+class RenderLock;  // forward declaration
+
+enum class HomeMenuItem { NONE, PINNED, FILE_BROWSER, RECENTS, TRANSFER_AND_SYNC, SETTINGS_MENU, BOOKORBIT_LIBRARY };
+
+/**
+ * ActivityManager
+ *
+ * This mirrors the same concept of Activity in Android, where an activity represents a single screen of the UI. The
+ * manager is responsible for launching activities, and ensuring that only one activity is active at a time.
+ *
+ * It also provides a stack mechanism to allow activities to launch sub-activities and get back the results when the
+ * sub-activity is done. For example, the WebServer activity can launch a WifiSelect activity to let the user choose a
+ * wifi network, and get back the selected network when the user is done.
+ *
+ * Main differences from Android's ActivityManager:
+ * - No onPause/onResume, since we don't have a concept of background activities
+ * - onActivityResult is implemented via a callback instead of a separate method, for simplicity
+ */
+class ActivityManager {
+  friend class RenderLock;
+
+ protected:
+  GfxRenderer& renderer;
+  MappedInputManager& mappedInput;
+  std::vector<std::unique_ptr<Activity>> stackActivities;
+  std::unique_ptr<Activity> currentActivity;
+
+  void exitActivity(const RenderLock& lock);
+
+  // Pending activity to be launched on next loop iteration
+  std::unique_ptr<Activity> pendingActivity;
+  enum class PendingAction { None, Push, Pop, Replace };
+  PendingAction pendingAction = PendingAction::None;
+
+  // Task to render and display the activity
+  TaskHandle_t renderTaskHandle = nullptr;
+  static void renderTaskTrampoline(void* param);
+  [[noreturn]] virtual void renderTaskLoop();
+
+  // Set by requestUpdateAndWait(); read and cleared by the render task after render completes.
+  // Note: only one waiting task is supported at a time
+  TaskHandle_t waitingTaskHandle = nullptr;
+
+  // Mutex to protect rendering operations from race conditions
+  // Must only be used via RenderLock
+  SemaphoreHandle_t renderingMutex = nullptr;
+
+  // Incremented whenever new input or navigation supersedes the render in
+  // progress. Only render-task locks snapshot this value; ordinary mutex uses
+  // remain unchanged.
+  std::atomic<uint32_t> renderGeneration{0};
+  void invalidateRender() { renderGeneration.fetch_add(1, std::memory_order_relaxed); }
+
+  // Whether to trigger a render after the current loop()
+  // This variable must only be set by the main loop, to avoid race conditions
+  std::atomic<bool> requestedUpdate{false};
+
+  // Latched when navigation closes a reader (Home, file browser, or opening the
+  // next book). The reader is destroyed first; only then may KOReaderAutoSync
+  // allocate WiFi/TLS state.
+  bool syncOnReaderExit = false;
+  // A reader-to-reader replacement cannot synchronize the new book until the old reader has
+  // flushed and released its EPUB/Section allocations. Consumed in loop() immediately before the
+  // pending Reader activity enters.
+  std::string pendingReaderSyncPath;
+
+  // See requestIdleTimerReset(). Set from an activity's loop() (main-loop task), consumed by
+  // main.cpp's loop() on the same task -- no cross-task access, so a plain bool is enough.
+  bool idleTimerResetRequested = false;
+
+ public:
+  explicit ActivityManager(GfxRenderer& renderer, MappedInputManager& mappedInput)
+      : renderer(renderer), mappedInput(mappedInput), renderingMutex(xSemaphoreCreateMutex()) {
+    assert(renderingMutex != nullptr && "Failed to create rendering mutex");
+    stackActivities.reserve(10);
+  }
+  ~ActivityManager() { assert(false); /* should never be called */ };
+
+  void begin();
+  void loop();
+
+  // Will replace currentActivity and drop all activities on stack
+  void replaceActivity(std::unique_ptr<Activity>&& newActivity);
+
+  // goTo... functions are convenient wrapper for replaceActivity()
+  void goToFileTransfer();
+  // The file-transfer web server opened for BookOrbit setup (no Calibre; URL/QR to /settings).
+  void goToBookOrbitWebSetup();
+  void goToSettings();
+  void goToFileBrowser(std::string path = {});
+  void goToCoverGridBrowser();
+  void goToLibraryList();
+  // Auto-triggered library index rebuild: no confirm dialog, starts straight into building, and
+  // calls `onDone` on any terminal outcome (success/up-to-date/cancelled/failed) instead of
+  // returning to a caller on the activity stack -- used when entering a grouped Covers/Titles
+  // view with a possibly-stale index (see HomeActivity::onFileBrowserOpen()). The manual
+  // Settings > System > Rebuild Library Index action does not use this -- it starts
+  // LibraryIndexRebuildActivity directly via startActivityForResult instead.
+  void goToLibraryIndexRebuild(std::function<void()> onDone);
+  void goToRecentBooks();
+  void goToCoverGridRecentBooks();
+  void goToBrowser();
+  // BookOrbit library (BookOrbitCatalogBrowserActivity) entered from the BookOrbit Home; `search`
+  // opens straight into search once the library root is available.
+  void goToBookOrbitLibrary(bool search = false);
+  // Picker shown when OPDS servers are configured (File Transfer + OPDS Browser). When none are
+  // configured, HomeActivity's Transfer & Sync row calls goToFileTransfer() directly instead --
+  // see HomeActivity::onTransferAndSyncOpen.
+  void goToTransferAndSync();
+  // checkRemoteProgress: true for a genuine user-initiated "open this book" action. Boot resumes
+  // pass false and originate no network transaction of their own -- they only apply whatever a
+  // prior periodic/sleep/open/close sync already staged (see main.cpp's resumeReaderOnBoot
+  // handling); manual KOSync return also deliberately skips a duplicate transaction. Every enabled
+  // path is bidirectional.
+  // skipInitialRender: X3 Quick Resume only -- see EpubReaderActivity::onEnter(). Passed through
+  // to EpubReaderActivity; ignored for TXT/XTC/BMP.
+  void goToReader(std::string path, bool allowFastInitialRefresh = false, bool checkRemoteProgress = false,
+                  bool skipInitialRender = false);
+  void goToSleep(bool fromTimeout = false);
+  void goToBoot();
+  void goToFullScreenMessage(std::string message, EpdFontFamily::Style style = EpdFontFamily::REGULAR);
+  void goToCrashReport();
+  void goHome(HomeMenuItem initialMenuItem = HomeMenuItem::NONE);
+
+  // This will move current activity to stack instead of deleting it
+  void pushActivity(std::unique_ptr<Activity>&& activity);
+
+  // Remove the currentActivity, returning the last one on stack
+  // Note: if popActivity() on last activity on the stack, we will goHome()
+  void popActivity();
+
+  bool preventAutoSleep() const;
+  bool isReaderActivity() const;
+  // True only when the current (not stacked) activity is a reader opted into the X3 immediate
+  // idle-power path AND nothing is pending: no queued activity transition, no outstanding render
+  // request. Checking currentActivity alone (not the stack) deliberately excludes a pushed
+  // sub-activity (menu, footnotes, chapter select) sitting on top of a reader -- only the reader's
+  // own base idle wait is eligible.
+  bool canEnterReaderIdlePowerSaving() const;
+  // True only when the CURRENT (not stacked) activity reports a clean quick-resume-eligible base
+  // view -- deliberately excludes a pushed sub-activity (menu, footnotes) sitting on top of a
+  // reader, unlike isReaderActivity()'s stack-wide check. See Activity::isQuickResumeEligibleBaseView.
+  bool isQuickResumeBaseViewEligible() const;
+  bool handleForcedRefresh();
+  bool skipLoopDelay() const;
+  // One-shot request to treat "now" as the moment of last user activity, resetting main.cpp's
+  // auto-sleep inactivity baseline (see its loop()). For an activity that blocks the main loop
+  // for a long stretch -- a synchronous multi-minute font download -- during which
+  // preventAutoSleep() is never polled: the instant it stops preventing sleep it would otherwise
+  // be judged idle since before the download started and sleep immediately, hiding its own
+  // result screen. The alternative such an activity had was to keep preventing auto-sleep
+  // forever, which never sleeps at all.
+  //
+  // Latched rather than applied directly because lastActivityTime lives in main.cpp's loop; the
+  // flag is consumed at the top of the next iteration, before that iteration's sleep check.
+  void requestIdleTimerReset() { idleTimerResetRequested = true; }
+  // Reads and clears the latch. Call exactly once per main-loop iteration.
+  bool consumeIdleTimerReset() {
+    const bool requested = idleTimerResetRequested;
+    idleTimerResetRequested = false;
+    return requested;
+  }
+  ScreenshotInfo getScreenshotInfo() const;
+
+  // If immediate is true, the update will be triggered immediately.
+  // Otherwise, it will be deferred until the end of the current loop iteration.
+  void requestUpdate(bool immediate = false);
+
+  // Trigger a render and block until it completes.
+  // Must NOT be called from the render task or while holding a RenderLock.
+  void requestUpdateAndWait();
+};
+
+extern ActivityManager activityManager;  // singleton, to be defined in main.cpp

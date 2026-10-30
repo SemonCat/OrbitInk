@@ -1,0 +1,7 @@
+add_executable(zh_tw_custom_profile_tests ZhTwCustomProfileTest.cpp)
+target_include_directories(zh_tw_custom_profile_tests PRIVATE
+  ${REPO_ROOT}/lib/CustomZhTwProfile
+)
+target_compile_definitions(zh_tw_custom_profile_tests PRIVATE CROSSFADE_CUSTOM_ZH_TW=1)
+target_link_libraries(zh_tw_custom_profile_tests PRIVATE crosspoint_test_common GTest::gtest_main)
+gtest_discover_tests(zh_tw_custom_profile_tests)

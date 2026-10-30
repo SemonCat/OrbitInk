@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CrossFade Reader - 韌體更新</title>
+    <style>
+      :root {
+        --font-color: #333;
+        --bg: #f5f5f5;
+        --title-color: #2c3e50;
+        --card-bg: #FFF;
+        --label-color: #7f8c8d;
+        --border-color: #eee;
+        --accent-color: rgb(110, 154, 130);
+        --accent-hover-color: #5a8c73;
+        --danger-color: #e74c3c;
+        --danger-hover: #c0392b;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --font-color: #f5f5f5;
+          --bg: #333;
+          --title-color: #ecf0f1;
+          --card-bg: #444;
+          --label-color: #bdc3c7;
+          --border-color: #555;
+          color-scheme: dark;
+        }
+      }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          Oxygen, Ubuntu, sans-serif;
+        max-width: 800px;
+        margin: 0 auto;
+        padding: 20px;
+        background-color: var(--bg);
+        color: var(--font-color);
+      }
+      h1 {
+        color: var(--title-color);
+        border-bottom: 2px solid var(--accent-color);
+        padding-bottom: 10px;
+      }
+      h2 { color: var(--title-color); margin-top: 0; }
+      .card {
+        background: var(--card-bg);
+        border-radius: 8px;
+        padding: 20px;
+        margin: 15px 0;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+      }
+      .nav-links { margin: 20px 0; display: flex; gap: 10px; flex-wrap: wrap; }
+      .nav-links a {
+        padding: 10px 20px;
+        color: var(--font-color);
+        text-decoration: none;
+        border-radius: 4px;
+      }
+      .nav-links a.active { background-color: var(--accent-color); color: white; }
+      .nav-links a:not(.active):hover { background-color: var(--accent-hover-color); color: white; }
+      .btn { padding: 8px 18px; border: none; border-radius: 4px; cursor: pointer; font-size: 0.95em; }
+      .btn:disabled { opacity: 0.5; cursor: default; }
+      .btn-primary { background: var(--accent-color); color: white; }
+      .btn-primary:hover:not(:disabled) { background: var(--accent-hover-color); }
+      .btn-danger { background: var(--danger-color); color: white; }
+      .btn-danger:hover:not(:disabled) { background: var(--danger-hover); }
+      .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 10px 0; }
+      .row input[type="file"] { flex: 1; min-width: 200px; }
+      .meta { color: var(--label-color); font-size: 0.9em; word-break: break-all; }
+      progress { width: 100%; height: 14px; }
+      #message { margin-top: 10px; padding: 8px; border-radius: 4px; display: none; }
+      .msg-ok { background: #d4edda; color: #155724; display: block !important; }
+      .msg-err { background: #f8d7da; color: #721c24; display: block !important; }
+      .msg-info { background: #e2e3e5; color: #383d41; display: block !important; }
+      code { word-break: break-all; }
+    </style>
+  </head>
+  <body>
+    <h1>📚 CrossFade Reader</h1>
+
+    <div class="nav-links">
+      <a href="/">Home</a>
+      <a href="/files">File Manager</a>
+      <a href="/settings">Settings</a>
+      <a href="/fonts">Fonts</a>
+      <a href="/update" class="active">Firmware</a>
+    </div>
+
+    <div class="card">
+      <h2>目前韌體</h2>
+      <p id="current" class="meta">讀取中…</p>
+    </div>
+
+    <div class="card">
+      <h2>上傳韌體（.bin）</h2>
+      <p class="meta">
+        上傳只會把檔案暫存到 SD 卡的隱藏資料夾並驗證，不會寫入韌體。驗證通過後按「套用」，
+        還需要在裝置上按確認才會開始寫入。書籍與設定不受影響。
+      </p>
+      <div class="row">
+        <input type="file" id="file" accept=".bin,application/octet-stream" />
+        <button class="btn btn-primary" id="upload-btn">上傳並驗證</button>
+        <button class="btn btn-danger" id="cancel-btn" disabled>取消</button>
+      </div>
+      <progress id="progress" value="0" max="100" hidden></progress>
+      <div id="staged" hidden>
+        <p class="meta">已驗證：<span id="staged-size"></span> 位元組<br />SHA-256：<code id="staged-sha"></code></p>
+        <div class="row"><button class="btn btn-primary" id="apply-btn">套用（需在裝置上確認）</button></div>
+      </div>
+      <div id="message" role="status" aria-live="polite"></div>
+    </div>
+
+    <script>
+      let xhr = null;
+      let staged = null;
+      let status = null;
+      let busy = false;
+      const $ = (id) => document.getElementById(id);
+
+      function show(text, kind) {
+        const el = $('message');
+        el.textContent = text;
+        el.className = kind ? 'msg-' + kind : '';
+      }
+
+      const ERRORS = {
+        TOO_LARGE: '檔案超過韌體分割區大小',
+        INVALID: '不是有效的 ESP32-C3 韌體映像（請使用 X3 專用檔案）',
+        BUSY: '另一個上傳正在進行',
+        IO: 'SD 卡寫入失敗',
+        OOM: '裝置記憶體不足',
+        ABORTED: '上傳已中斷',
+        NO_FILE: '沒有收到檔案',
+        APPLYING: '裝置正在等待確認',
+      };
+
+      function describe(body) {
+        const base = ERRORS[body && body.error] || '上傳失敗';
+        return body && body.image && body.image !== 'OK' ? base + '（' + body.image + '）' : base;
+      }
+
+      function render() {
+        $('staged').hidden = !staged;
+        if (staged) {
+          $('staged-size').textContent = staged.size.toLocaleString();
+          $('staged-sha').textContent = staged.sha256;
+        }
+        $('cancel-btn').disabled = busy || (!xhr && !staged);
+        $('upload-btn').disabled = busy || !!xhr;
+        $('apply-btn').disabled = busy || !!xhr;
+      }
+
+      async function loadStatus() {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 5000);
+        let resp;
+        try {
+          resp = await fetch('/api/firmware', { cache: 'no-store', signal: controller.signal });
+        } finally {
+          clearTimeout(timer);
+        }
+        status = await resp.json();
+        $('current').textContent = '版本 ' + status.version + (status.build ? '（build ' + status.build + '）' : '') +
+          '；可寫入上限 ' + status.limit.toLocaleString() + ' 位元組';
+        staged = status.state === 'STAGED' ? { size: status.size, sha256: status.sha256 } : null;
+        if (status.state === 'APPLYING') show('裝置正在等待確認。', 'info');
+        render();
+        return status;
+      }
+
+      async function discard() {
+        const resp = await fetch('/api/firmware/discard', { method: 'POST' });
+        if (!resp.ok) throw new Error(describe(await resp.json().catch(() => null)));
+        staged = null;
+        show('已取消，暫存檔已刪除。', 'info');
+      }
+
+      $('upload-btn').addEventListener('click', () => {
+        const file = $('file').files[0];
+        if (!file) { show('請先選擇 .bin 檔案', 'err'); return; }
+        if (status && status.limit && file.size > status.limit) { show(ERRORS.TOO_LARGE, 'err'); return; }
+        staged = null;
+        const form = new FormData();
+        form.append('file', file, 'firmware.bin');
+        xhr = new XMLHttpRequest();
+        xhr.open('POST', '/api/firmware/upload');
+        $('progress').hidden = false;
+        $('progress').value = 0;
+        xhr.upload.onprogress = (e) => { if (e.lengthComputable) $('progress').value = (e.loaded / e.total) * 100; };
+        xhr.onload = () => {
+          let body = null;
+          try { body = JSON.parse(xhr.responseText); } catch (e) {}
+          const ok = xhr.status === 200;
+          xhr = null;
+          $('progress').hidden = true;
+          if (ok && body && body.state === 'STAGED') {
+            staged = { size: body.size, sha256: body.sha256 };
+            show('驗證通過。請核對 SHA-256 後按「套用」。', 'ok');
+          } else {
+            show(describe(body), 'err');
+          }
+          render();
+        };
+        xhr.onerror = () => {
+          xhr = null;
+          $('progress').hidden = true;
+          show(ERRORS.ABORTED, 'err');
+          loadStatus().catch(() => {});
+        };
+        xhr.onabort = async () => {
+          xhr = null;
+          busy = true;
+          $('progress').hidden = true;
+          render();
+          // The device may have finished staging just before the browser aborted. Queue discard
+          // on its serial HTTP server so Cancel also removes that completed image.
+          try { await discard(); }
+          catch (e) { show('取消未完成：' + e.message + '。請重新連線後按取消。', 'err'); }
+          finally { busy = false; render(); }
+        };
+        xhr.send(form);
+        show('上傳中…', 'info');
+        render();
+      });
+
+      $('cancel-btn').addEventListener('click', async () => {
+        if (xhr) { xhr.abort(); return; }
+        busy = true;
+        render();
+        try { await discard(); }
+        catch (e) { show(e.message, 'err'); }
+        finally { busy = false; render(); }
+      });
+
+      $('apply-btn').addEventListener('click', async () => {
+        if (!staged) return;
+        if (!confirm('要以這個檔案更新韌體嗎？\nSHA-256：' + staged.sha256 + '\n\n接著請在裝置上按確認。')) return;
+        const before = status ? status.build : 0;
+        busy = true;
+        render();
+        try {
+          const resp = await fetch('/api/firmware/apply', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: 'sha256=' + encodeURIComponent(staged.sha256),
+          });
+          if (resp.status !== 202) throw new Error(describe(await resp.json().catch(() => null)));
+        } catch (e) {
+          busy = false;
+          show(e.message, 'err');
+          render();
+          return;
+        }
+        staged = null;
+        render();
+        show('請在裝置上確認。寫入時請勿關機；完成後裝置會自動重新開機，本頁會自動更新。', 'info');
+        poll(before);
+      });
+
+      // During the on-device confirmation and the flash the device does not answer; afterwards it either
+      // reboots into the new build or (declined / failed) returns to the web server with nothing staged.
+      async function poll(before) {
+        for (let i = 0; i < 120; i++) {
+          await new Promise((r) => setTimeout(r, 3000));
+          try {
+            const s = await loadStatus();
+            if (s.state === 'APPLYING') continue;
+            if (s.build !== before) show('更新完成：版本 ' + s.version + '（build ' + s.build + '）', 'ok');
+            else show('裝置未套用更新（已取消或失敗），暫存檔已刪除。', 'err');
+            busy = false;
+            render();
+            return;
+          } catch (e) { /* device busy or rebooting */ }
+        }
+        // A successful flash reboots to Home, so the web server is gone: check the version on the device.
+        show('裝置已重新開機或沒有回應。請在裝置「設定 > 系統」檢視版本；若仍是舊版本，請重新上傳。', 'info');
+        busy = false;
+        render();
+      }
+
+      loadStatus().catch(() => show('無法讀取裝置狀態', 'err'));
+    </script>
+  </body>
+</html>

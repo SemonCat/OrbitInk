@@ -1,0 +1,37 @@
+.pio
+.idea
+.DS_Store
+.vscode
+open-x4-sdk
+fs_
+lib/EpdFont/fontsrc
+lib/I18n/I18nKeys.h
+lib/I18n/I18nStrings.h
+lib/I18n/I18nStrings.cpp
+*.generated.h
+.vs
+build
+**/__pycache__/
+/compile_commands.json
+/.cache
+/.release-sdk/
+.history/
+/.venv
+*.local*
+*.cpfont
+lib/EpdFont/scripts/downloaded_fonts/
+lib/EpdFont/scripts/instanced_fonts/
+lib/EpdFont/scripts/output/
+# Private per-build release packages (firmware + SD assets for a specific custom
+# profile) -- generated artifacts, never source. See dist/x3-zh-tw/README.
+/dist/
+# Claude Code: share project skills with the team, keep local agent state
+# (worktrees, scheduled-task locks, settings.local, scout CLEANUP.md) out.
+.claude/*
+!.claude/skills/
+/managed_components
+/.dummy
+/CMakeLists.txt
+/dependencies.lock
+/sdkconfig.*
+sdkconfig.sticky

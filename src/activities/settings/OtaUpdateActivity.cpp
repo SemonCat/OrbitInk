@@ -1,0 +1,242 @@
+#include "OtaUpdateActivity.h"
+
+#include <GfxRenderer.h>
+#include <I18n.h>
+#include <WiFi.h>
+
+#include "MappedInputManager.h"
+#include "SilentRestart.h"
+#include "activities/network/WifiSelectionActivity.h"
+#include "components/UITheme.h"
+#include "fontIds.h"
+#include "network/OtaChannel.h"
+#include "network/OtaUpdater.h"
+
+namespace {
+// Custom releases share the runtime version with upstream; the build number is what orders them
+// (and what the signed manifest's "new version" line carries), so show it for the current one too.
+#if CROSSFADE_CUSTOM_ZH_TW
+constexpr char CURRENT_BUILD_SUFFIX[] = " (build " CROSSFADE_OTA_STR(CROSSFADE_OTA_BUILD) ")";
+#else
+constexpr char CURRENT_BUILD_SUFFIX[] = "";
+#endif
+}  // namespace
+
+void OtaUpdateActivity::onWifiSelectionComplete(const bool success) {
+  if (!success) {
+    LOG_ERR("OTA", "WiFi connection failed, exiting");
+    finish();
+    return;
+  }
+
+  LOG_DBG("OTA", "WiFi connected, checking for update");
+
+  {
+    RenderLock lock(*this);
+    state = CHECKING_FOR_UPDATE;
+  }
+  requestUpdateAndWait();
+
+  const auto res = updater.checkForUpdate();
+  if (res != OtaUpdater::OK && res != OtaUpdater::NO_UPDATE) {
+    LOG_DBG("OTA", "Update check failed: %d", res);
+    {
+      RenderLock lock(*this);
+      state = FAILED;
+    }
+    return;
+  }
+
+  if (res == OtaUpdater::NO_UPDATE || !updater.isUpdateNewer()) {
+    LOG_DBG("OTA", "No new update available");
+    {
+      RenderLock lock(*this);
+      state = NO_UPDATE;
+    }
+    return;
+  }
+
+  {
+    RenderLock lock(*this);
+    state = WAITING_CONFIRMATION;
+  }
+  // Same Cancel/[verb] OptionPopup every other confirmation dialog uses (see
+  // ConfirmationActivity, LibraryIndexRebuildActivity's WARNING state) -- currentIndex=0 defaults
+  // the highlight to Cancel, matching both of those.
+  const char* options[] = {tr(STR_CANCEL), tr(STR_UPDATE)};
+  confirmPopup.show(updater.isChannelDowngrade() ? tr(STR_OTA_DOWNGRADE) : tr(STR_UPDATE), options, 2, 0,
+                    [this](const int idx) {
+    if (idx == 1) {
+      runUpdateInstall();
+    } else {
+      finish();
+    }
+  });
+}
+
+void OtaUpdateActivity::onEnter() {
+  Activity::onEnter();
+
+  // Turn on WiFi immediately
+  LOG_DBG("OTA", "Turning on WiFi...");
+  WiFi.mode(WIFI_STA);
+
+  // Launch WiFi selection subactivity
+  LOG_DBG("OTA", "Launching WifiSelectionActivity...");
+  startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput),
+                         [this](const ActivityResult& result) { onWifiSelectionComplete(!result.isCancelled); });
+}
+
+void OtaUpdateActivity::onExit() {
+  Activity::onExit();
+
+  // Success path reboots via the SHUTTING_DOWN state's plain ESP.restart()
+  // (loop() above) so the new firmware boots normally. Back-out paths land
+  // here with wifi still active; silent-restart to free the LWIP/mbedTLS
+  // fragmentation, same as the other wifi activities.
+  if (WiFi.getMode() != WIFI_MODE_NULL) {
+    WiFi.disconnect(false);
+    delay(30);
+    silentRestart();
+  }
+}
+
+void OtaUpdateActivity::render(RenderLock&&) {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const auto pageWidth = renderer.getScreenWidth();
+  const auto pageHeight = renderer.getScreenHeight();
+
+  renderer.clearScreen();
+
+  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_UPDATE));
+  const auto height = renderer.getLineHeight(UI_10_FONT_ID);
+  const auto top = (pageHeight - height) / 2;
+
+  float updaterProgress = 0;
+  if (state == UPDATE_IN_PROGRESS) {
+    LOG_DBG("OTA", "Update progress: %d / %d", updater.getProcessedSize(), updater.getTotalSize());
+    updaterProgress = static_cast<float>(updater.getProcessedSize()) / static_cast<float>(updater.getTotalSize());
+    // Only update every 2% at the most
+    if (static_cast<int>(updaterProgress * 50) == lastUpdaterPercentage / 2) {
+      return;
+    }
+    lastUpdaterPercentage = static_cast<int>(updaterProgress * 100);
+  }
+
+  if (state == CHECKING_FOR_UPDATE) {
+    renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_CHECKING_UPDATE));
+  } else if (state == WAITING_CONFIRMATION) {
+    // confirmPopup is vertically centered on the screen (see OptionPopup::getLayout), same as
+    // every other confirmation dialog. This block is 3 lines instead of the usual 1, so instead of
+    // starting at center like the other single-line states here, anchor it to end 20px above
+    // center -- the same clearance LibraryIndexRebuildActivity's WARNING text uses above its own
+    // confirmPopup -- so the popup doesn't cover it.
+    const auto infoTop = pageHeight / 2 - 20 - (height * 2 + metrics.verticalSpacing * 2);
+    renderer.drawCenteredText(UI_10_FONT_ID, infoTop, tr(STR_NEW_UPDATE), true, EpdFontFamily::BOLD);
+    renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, infoTop + height + metrics.verticalSpacing,
+                      (std::string(tr(STR_CURRENT_VERSION)) + CROSSPOINT_VERSION + CURRENT_BUILD_SUFFIX).c_str());
+    renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, infoTop + height * 2 + metrics.verticalSpacing * 2,
+                      (std::string(tr(STR_NEW_VERSION)) + updater.getLatestVersion()).c_str());
+
+    if (confirmPopup.processRender(renderer, mappedInput)) return;
+  } else if (state == UPDATE_IN_PROGRESS) {
+    renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_UPDATING));
+
+    int y = top + height + metrics.verticalSpacing;
+    GUI.drawProgressBar(
+        renderer,
+        Rect{metrics.contentSidePadding, y, pageWidth - metrics.contentSidePadding * 2, metrics.progressBarHeight},
+        static_cast<int>(updaterProgress * 100), 100);
+
+    y += metrics.progressBarHeight + metrics.verticalSpacing;
+    // Percent label is drawn by BaseTheme::drawProgressBar; this slot is left intentionally empty
+    // so the bytes line below stays at the same Y it was at when the activity drew its own percent.
+    y += height + metrics.verticalSpacing;
+    renderer.drawCenteredText(
+        UI_10_FONT_ID, y,
+        (std::to_string(updater.getProcessedSize()) + " / " + std::to_string(updater.getTotalSize())).c_str());
+  } else if (state == NO_UPDATE) {
+    renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_NO_UPDATE), true, EpdFontFamily::BOLD);
+    const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  } else if (state == FAILED) {
+    renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_UPDATE_FAILED), true, EpdFontFamily::BOLD);
+    const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  } else if (state == FINISHED) {
+    renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_UPDATE_COMPLETE), true, EpdFontFamily::BOLD);
+    renderer.drawCenteredText(UI_10_FONT_ID, top + height + metrics.verticalSpacing, tr(STR_POWER_ON_HINT));
+  }
+
+  renderer.displayBuffer();
+}
+
+void OtaUpdateActivity::runUpdateInstall() {
+  LOG_DBG("OTA", "New update available, starting download...");
+  {
+    RenderLock lock(*this);
+    state = UPDATE_IN_PROGRESS;
+  }
+  requestUpdateAndWait();
+  const auto res = updater.installUpdate(
+      [](void* ctx) {
+        // immediate=true notifies the render task directly. The default deferred path only
+        // sets a flag consumed at the end of ActivityManager::loop(), which never runs while
+        // installUpdate() blocks this task.
+        static_cast<OtaUpdateActivity*>(ctx)->requestUpdate(true);
+      },
+      this);
+
+  if (res != OtaUpdater::OK) {
+    LOG_DBG("OTA", "Update failed: %d", res);
+    {
+      RenderLock lock(*this);
+      state = FAILED;
+    }
+    requestUpdate();
+    return;
+  }
+
+  {
+    RenderLock lock(*this);
+    state = FINISHED;
+  }
+  requestUpdateAndWait();
+  // Hold the completion screen briefly so the user sees it, then restart.
+  delay(3000);
+  {
+    RenderLock lock(*this);
+    state = SHUTTING_DOWN;
+  }
+}
+
+void OtaUpdateActivity::loop() {
+  if (state == WAITING_CONFIRMATION) {
+    if (confirmPopup.handleInput(mappedInput, [this] { requestUpdate(); })) return;
+    // Popup dismissed without an explicit selection (Back button or tap outside): cancel.
+    finish();
+    return;
+  }
+
+  if (state == FAILED) {
+    int x = 0;
+    int y = 0;
+    if (mappedInput.wasPressed(MappedInputManager::Button::Back) || mappedInput.wasScreenTapped(x, y)) {
+      finish();
+    }
+    return;
+  }
+
+  if (state == NO_UPDATE) {
+    int x = 0;
+    int y = 0;
+    if (mappedInput.wasPressed(MappedInputManager::Button::Back) || mappedInput.wasScreenTapped(x, y)) {
+      finish();
+    }
+    return;
+  }
+
+  if (state == SHUTTING_DOWN) {
+    ESP.restart();
+  }
+}

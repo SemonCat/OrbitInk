@@ -1,0 +1,129 @@
+#pragma once
+
+#include <Print.h>
+#include <common/FsApiConstants.h>  // for oflag_t
+#include <freertos/semphr.h>
+
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
+
+class HalFile;
+
+class HalStorage {
+ public:
+  enum class PathStatus : uint8_t { Present, Absent, Error };
+
+  HalStorage();
+  bool begin();
+  bool ready() const;
+  std::vector<String> listFiles(const char* path = "/", int maxFiles = 200);
+  // Read the entire file at `path` into a String. Returns empty string on failure.
+  String readFile(const char* path);
+  // Low-memory helpers:
+  // Stream the file contents to a `Print` (e.g. `Serial`, or any `Print`-derived object).
+  // Returns true on success, false on failure.
+  bool readFileToStream(const char* path, Print& out, size_t chunkSize = 256);
+  // Read up to `bufferSize-1` bytes into `buffer`, null-terminating it. Returns bytes read.
+  size_t readFileToBuffer(const char* path, char* buffer, size_t bufferSize, size_t maxBytes = 0);
+  // Write a string to `path` on the SD card. Overwrites existing file.
+  // Returns true on success.
+  bool writeFile(const char* path, const String& content);
+  // Ensure a directory exists, creating it if necessary. Returns true on success.
+  bool ensureDirectoryExists(const char* path);
+
+  HalFile open(const char* path, const oflag_t oflag = O_RDONLY);
+  bool mkdir(const char* path, const bool pFlag = true);
+  bool exists(const char* path);
+  // Unlike exists(), distinguishes a confirmed missing path from an I/O failure. SdFat's
+  // exists() is implemented as an attempted open and returns false for both. This walks path
+  // components from the root and reports Absent only after a complete, error-free directory
+  // enumeration, which destructive recovery/migration decisions require.
+  PathStatus probePath(const char* path);
+  bool remove(const char* path);
+  bool rename(const char* oldPath, const char* newPath);
+  bool rmdir(const char* path);
+
+  bool openFileForRead(const char* moduleName, const char* path, HalFile& file);
+  bool openFileForRead(const char* moduleName, const std::string& path, HalFile& file);
+  bool openFileForRead(const char* moduleName, const String& path, HalFile& file);
+  bool openFileForWrite(const char* moduleName, const char* path, HalFile& file);
+  bool openFileForWrite(const char* moduleName, const std::string& path, HalFile& file);
+  bool openFileForWrite(const char* moduleName, const String& path, HalFile& file);
+  bool removeDir(const char* path);
+
+  static HalStorage& getInstance() { return instance; }
+
+  class StorageLock;  // private class, used internally
+
+ private:
+  static HalStorage instance;
+
+  bool initialized = false;
+  SemaphoreHandle_t storageMutex = nullptr;
+};
+
+#define Storage HalStorage::getInstance()
+
+class HalFile : public Print {
+  friend class HalStorage;
+  class Impl;
+  std::unique_ptr<Impl> impl;
+  explicit HalFile(std::unique_ptr<Impl> impl);
+
+ public:
+  HalFile();
+  ~HalFile();
+  HalFile(HalFile&&);
+  HalFile& operator=(HalFile&&);
+  HalFile(const HalFile&) = delete;
+  HalFile& operator=(const HalFile&) = delete;
+
+  void flush();
+  size_t getName(char* name, size_t len);
+  size_t size();
+  size_t fileSize();
+  uint64_t fileSize64();
+  bool seek(size_t pos);
+  bool seek64(uint64_t pos);
+  bool seekCur(int64_t offset);
+  bool seekSet(size_t offset);
+  int available() const;
+  size_t position() const;
+  int read(void* buf, size_t count);
+  int read();  // read a single byte
+  size_t write(const void* buf, size_t count);
+  // Overrides Print::write(const uint8_t*, size_t) -- without this, a caller holding a HalFile
+  // only through a `Print&` (e.g. ZipFile::readFileToStream's `out` parameter) dispatches to
+  // Print's default implementation, which loops write(uint8_t) one byte at a time through the
+  // storage mutex instead of the single locked bulk write below.
+  size_t write(const uint8_t* buffer, size_t size) override;
+  size_t write(uint8_t b) override;
+  bool rename(const char* newPath);
+  bool isDirectory() const;
+  void rewindDirectory();
+  // Packed FAT date/time of this entry's last modification (FS_DATE/FS_TIME encoding, 2-second
+  // resolution). Reads a field already present in the directory entry cached by open()/
+  // openNextFile() -- no extra SD transaction in the common case of querying it right after
+  // enumerating the entry. Returns false if the file isn't open. Note: this firmware never
+  // registers an SdFat date/time callback (no RTC/NTP wiring to FsDateTime::setCallback), so any
+  // file this firmware itself writes (File Transfer uploads, OPDS downloads) gets the FAT default
+  // (packed 0) rather than a real timestamp -- only files copied on via a PC get a meaningful one.
+  bool getModifyTime(uint16_t& fatDate, uint16_t& fatTime) const;
+  // Uses SdFat's own FAT/exFAT name matcher, including its case-folding rules. Errors remain on
+  // this directory handle for getError() to distinguish from a clean not-found result.
+  bool exists(const char* path);
+  // SdFat records directory-enumeration read failures on the directory handle. A false
+  // openNextFile() with getError()==0 is clean end-of-directory; nonzero is an I/O failure.
+  uint8_t getError() const;
+  bool close();
+  HalFile openNextFile();
+  bool isOpen() const;
+  operator bool() const;
+};
+
+// Downstream code must use Storage instead of SdMan
+#ifdef SdMan
+#undef SdMan
+#endif

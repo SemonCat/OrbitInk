@@ -1,0 +1,8 @@
+{
+  "name": "CrossFadeSimHal",
+  "version": "0.1.0",
+  "description": "CrossFade-owned adapters for the pinned crosspoint-simulator HAL. Simulator builds only; see sim/README.md.",
+  "license": "MIT",
+  "frameworks": "*",
+  "platforms": "native"
+}
