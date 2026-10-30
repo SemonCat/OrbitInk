@@ -71,8 +71,7 @@ std::vector<Entry> collapse(const std::vector<LibraryIndex::Entry>& indexEntries
 // flatten()) and only fall back to a live scan if none exists -- for a caller that just rebuilt
 // the index itself and knows it's current. Ignored when groupBySeries is true (already reads the
 // index in that case). Defaults to false so existing ungrouped callers keep their always-live-scan
-// guarantee (LibraryListActivity's Titles view, which never rebuilds on its own and must reflect
-// the SD card exactly, not a possibly-stale index from some earlier Covers visit).
+// guarantee. Covers and Titles pass true after the automatic metadata index check.
 std::vector<Entry> loadLibraryEntries(bool groupBySeries, bool preferIndexWhenFlat = false);
 
 // Resolves entries[pageStart, pageEnd) in place: title/author for any entry that doesn't have

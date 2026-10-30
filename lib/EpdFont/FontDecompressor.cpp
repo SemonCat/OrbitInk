@@ -4,6 +4,7 @@
 #include <Logging.h>
 #include <Utf8.h>
 
+#include <algorithm>
 #include <cstdlib>
 
 FontDecompressor::~FontDecompressor() { deinit(); }
@@ -463,23 +464,29 @@ int FontDecompressor::prewarmCache(const EpdFontData* fontData, const char* utf8
   // Step 4: For each unique group, decompress to temp buffer and extract needed glyphs
   uint32_t writeOffset = 0;
   int missed = 0;
+  uint8_t* tempBuf = nullptr;
+  uint32_t tempCapacity = 0;
+  // Largest first: one successful scratch allocation serves the rest of this prewarm.
+  // Keep it local so the normal scope/TLS release contract retains no extra memory.
+  std::sort(neededGroups, neededGroups + groupCount, [fontData](uint16_t a, uint16_t b) {
+    return fontData->groups[a].uncompressedSize > fontData->groups[b].uncompressedSize;
+  });
 
   for (uint8_t g = 0; g < groupCount; g++) {
     uint16_t groupIdx = neededGroups[g];
     const EpdFontGroup& group = fontData->groups[groupIdx];
 
-    auto* tempBuf = static_cast<uint8_t*>(malloc(group.uncompressedSize));
-    if (!tempBuf) {
+    const bool needsAllocation = tempCapacity < group.uncompressedSize;
+    if (!ensureCapacity(tempBuf, tempCapacity, group.uncompressedSize)) {
       LOG_ERR("FDC", "Failed to allocate temp buffer (%u bytes) for group %u", group.uncompressedSize, groupIdx);
       missed++;
       continue;
     }
+    if (needsAllocation) ++stats.prewarmScratchAllocations;
     if (group.uncompressedSize > stats.peakTempBytes) {
       stats.peakTempBytes = group.uncompressedSize;
     }
-
     if (!decompressGroup(fontData, groupIdx, tempBuf, group.uncompressedSize)) {
-      free(tempBuf);
       missed++;
       continue;
     }
@@ -496,8 +503,8 @@ int FontDecompressor::prewarmCache(const EpdFontData* fontData, const char* utf8
       writeOffset += glyph.dataLength;
     }
 
-    free(tempBuf);
   }
+  free(tempBuf);
 
   LOG_DBG("FDC", "Prewarm: %u glyphs in %u bytes from %u groups (%d missed)", glyphCount, writeOffset, groupCount,
           missed);

@@ -36,6 +36,7 @@ class FontDecompressor {
     uint32_t pageGlyphsBytes = 0;  // pageGlyphs lookup table allocation
     uint32_t hotGroupBytes = 0;    // current hot group allocation
     uint32_t peakTempBytes = 0;    // largest temp buffer in prewarm
+    uint32_t prewarmScratchAllocations = 0;
     uint32_t getBitmapTimeUs = 0;  // cumulative getBitmap time (micros)
     uint32_t getBitmapCalls = 0;   // number of getBitmap calls
   };

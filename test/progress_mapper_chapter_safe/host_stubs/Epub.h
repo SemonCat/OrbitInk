@@ -12,6 +12,14 @@
 
 class Epub {
  public:
+  inline static std::optional<uint16_t> defaultCachedPages;
+  inline static bool compatibleLayout = true;
+  inline static bool partialLayout = false;
+  Epub(const std::string& path, const std::string&) : Epub(std::vector<std::string>(2, "<html><body><p>one</p><p>two</p></body></html>"),
+                                                         std::vector<size_t>(2, 100)) { path_ = path; }
+  void setupCacheDir() {}
+  std::string getPath() const { return path_; }
+  std::string getCachePath() const { return "/cache"; }
   struct SpineItem {
     std::string href;
   };
@@ -45,11 +53,15 @@ class Epub {
     return true;
   }
 
-  bool readItemContentsToStream(const std::string& href, Print& out, size_t, bool = false) const {
+  bool readItemContentsToStream(const std::string& href, Print& out, size_t, bool allowEarlyStop = false) const {
+    ++streamCalls_;
     const int index = indexForHref(href);
     if (index < 0) return false;
     const std::string& chapter = chapters_[index];
-    return out.write(reinterpret_cast<const uint8_t*>(chapter.data()), chapter.size()) == chapter.size();
+    return out.write(reinterpret_cast<const uint8_t*>(chapter.data()), chapter.size()) == chapter.size() || allowEarlyStop;
+  }
+  bool readSpineContentsToStream(int spineIndex, Print& out, size_t chunkSize, bool allowEarlyStop = false) const {
+    return readItemContentsToStream(getSpineItem(spineIndex).href, out, chunkSize, allowEarlyStop);
   }
 
   float calculateProgress(int spineIndex, float intra) const {
@@ -62,7 +74,9 @@ class Epub {
   }
 
   void setCachedPageCount(int spineIndex, std::optional<uint16_t> count) { cachePages_.at(spineIndex) = count; }
-  std::optional<uint16_t> cachedPageCount(int spineIndex) const { return cachePages_.at(spineIndex); }
+  std::optional<uint16_t> cachedPageCount(int spineIndex) const {
+    return cachePages_.at(spineIndex).has_value() ? cachePages_.at(spineIndex) : defaultCachedPages;
+  }
 
   void setBoundedLayoutPageCount(int spineIndex, std::optional<uint16_t> count) {
     boundedPages_.at(spineIndex) = count;
@@ -76,6 +90,7 @@ class Epub {
   int layoutBuildAttempts() const { return layoutBuildAttempts_; }
   int finalizedLayoutBuilds() const { return finalizedLayoutBuilds_; }
   int normalCssLoadCalls() const { return normalCssLoadCalls_; }
+  int streamCalls() const { return streamCalls_; }
 
   std::optional<uint16_t> pageForParagraph(int spineIndex, uint16_t paragraph) const {
     const auto count = cachedPageCount(spineIndex);
@@ -88,6 +103,7 @@ class Epub {
   }
 
  private:
+  std::string path_ = "/book.epub";
   int indexForHref(const std::string& href) const {
     static constexpr char prefix[] = "chapter";
     if (href.rfind(prefix, 0) != 0) return -1;
@@ -109,4 +125,5 @@ class Epub {
   int finalizedLayoutBuilds_ = 0;
   int layoutBuildAttempts_ = 0;
   int normalCssLoadCalls_ = 0;
+  mutable int streamCalls_ = 0;
 };

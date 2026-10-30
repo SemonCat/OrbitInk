@@ -93,7 +93,7 @@ ContentOpfParser::~ContentOpfParser() {
     tempItemStore.close();
   }
   const auto itemCachePath = cachePath + itemCacheFile;
-  if (Storage.exists(itemCachePath.c_str())) {
+  if (cache && Storage.exists(itemCachePath.c_str())) {
     Storage.remove(itemCachePath.c_str());
   }
 }
@@ -178,7 +178,7 @@ void XMLCALL ContentOpfParser::startElement(void* userData, const XML_Char* name
 
   if (self->state == IN_PACKAGE && opfNameEquals(name, "manifest")) {
     self->state = IN_MANIFEST;
-    if (!Storage.openFileForWrite("COF", self->cachePath + itemCacheFile, self->tempItemStore)) {
+    if (self->cache && !Storage.openFileForWrite("COF", self->cachePath + itemCacheFile, self->tempItemStore)) {
       LOG_ERR("COF", "Couldn't open temp items file for writing. This is probably going to be a fatal error.");
     }
     return;
@@ -186,7 +186,7 @@ void XMLCALL ContentOpfParser::startElement(void* userData, const XML_Char* name
 
   if (self->state == IN_PACKAGE && opfNameEquals(name, "spine")) {
     self->state = IN_SPINE;
-    if (!Storage.openFileForRead("COF", self->cachePath + itemCacheFile, self->tempItemStore)) {
+    if (self->cache && !Storage.openFileForRead("COF", self->cachePath + itemCacheFile, self->tempItemStore)) {
       LOG_ERR("COF", "Couldn't open temp items file for reading. This is probably going to be a fatal error.");
     }
 
@@ -207,7 +207,7 @@ void XMLCALL ContentOpfParser::startElement(void* userData, const XML_Char* name
     self->state = IN_GUIDE;
     // TODO Remove print
     LOG_DBG("COF", "Entering guide state.");
-    if (!Storage.openFileForRead("COF", self->cachePath + itemCacheFile, self->tempItemStore)) {
+    if (self->cache && !Storage.openFileForRead("COF", self->cachePath + itemCacheFile, self->tempItemStore)) {
       LOG_ERR("COF", "Couldn't open temp items file for reading. This is probably going to be a fatal error.");
     }
     return;
@@ -293,8 +293,10 @@ void XMLCALL ContentOpfParser::startElement(void* userData, const XML_Char* name
     }
 
     // Write items down to SD card
-    serialization::writeString(self->tempItemStore, itemId);
-    serialization::writeString(self->tempItemStore, href);
+    if (self->cache) {
+      serialization::writeString(self->tempItemStore, itemId);
+      serialization::writeString(self->tempItemStore, href);
+    }
 
     if (itemId == self->coverItemId) {
       // Some EPUBs set meta name="cover" to an XHTML wrapper item.
@@ -342,7 +344,7 @@ void XMLCALL ContentOpfParser::startElement(void* userData, const XML_Char* name
   // NOTE: This relies on spine appearing after item manifest (which is pretty safe as it's part of the EPUB spec)
   // Only run the spine parsing if there's a cache to add it to
   if (self->cache) {
-    if (self->state == IN_SPINE && opfNameEquals(name, "itemref")) {
+    if (self->cache && self->state == IN_SPINE && opfNameEquals(name, "itemref")) {
       for (int i = 0; atts[i]; i += 2) {
         if (strcmp(atts[i], "idref") == 0) {
           const std::string idref = atts[i + 1];

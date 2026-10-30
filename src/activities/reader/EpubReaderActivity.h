@@ -180,6 +180,9 @@ class EpubReaderActivity final : public Activity {
   // Set when the lazy extension start failed, so loop() doesn't retry (and log) every
   // tick; the blocking extension in render() remains the fallback past the watermark.
   bool partialRebuildStartFailed = false;
+  bool remotePositionPending = false;
+  bool remoteApplyAttempted = false;
+  bool remoteBuildFailed = false;
 
   // Position observed by the last render() tick, regardless of whether it was actually written --
   // detects a genuine page/spine change so a no-op re-render (menu/bookmark/screenshot) doesn't
@@ -241,9 +244,10 @@ class EpubReaderActivity final : public Activity {
   // spun at full CPU speed doing no work for as long as the reader stayed in that chapter.
   // Side-effect free: deliberately does NOT consult buildTickHeapGate() (see BuildWindow.h).
   bool hasBuildWorkInWindow() const {
-    return section && readerbuild::hasBuildWorkInWindow(section->isBuilding(), section->isPartial(),
+    return section && ((remotePositionPending && section->isBuilding()) ||
+                      readerbuild::hasBuildWorkInWindow(section->isBuilding(), section->isPartial(),
                                                         static_cast<int>(section->pageCount), section->currentPage,
-                                                        BUILD_WINDOW_AHEAD);
+                                                        BUILD_WINDOW_AHEAD));
   }
   // True while the background build is gated on the heap floors. Lets skipLoopDelay()
   // return the loop to normal delay/power-saving during the pause: isBuilding() stays

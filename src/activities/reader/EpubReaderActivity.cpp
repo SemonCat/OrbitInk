@@ -48,6 +48,7 @@
 #include "fontIds.h"
 #include "util/BookmarkUtil.h"
 #include "util/KOReaderAutoSync.h"
+#include "util/ProgressSyncDeferred.h"
 #include "util/ScreenshotUtil.h"
 
 namespace {
@@ -264,7 +265,7 @@ void EpubReaderActivity::onEnter() {
   }
   // We may want a better condition to detect if we are opening for the first time.
   // This will trigger if the book is re-opened at Chapter 0.
-  if (currentSpineIndex == 0) {
+  if (currentSpineIndex == 0 && !hadSavedProgress) {
     int textSpineIndex = epub->getSpineIndexForTextReference();
     if (textSpineIndex != 0) {
       currentSpineIndex = textSpineIndex;
@@ -272,6 +273,14 @@ void EpubReaderActivity::onEnter() {
     }
   }
   if (!hadSavedProgress) readingNavigationPending = true;
+  if (const auto target = ProgressSyncDeferred::readerSpine(epub)) {
+    currentSpineIndex = *target;
+    nextPageNumber = 0;
+    cachedChapterTotalPageCount = 0;
+    remotePositionPending = true;
+    readingNavigationPending = false;
+    skipInitialRender = false;
+  }
 
   // Save current epub as last opened epub and add to recent books
   APP_STATE.openEpubPath = epub->getPath();
@@ -475,7 +484,8 @@ void EpubReaderActivity::loop() {
   // partial being extended.
   if (section && !section->isBuilding() && section->isPartial() && !RenderLock::peek() && buildViewportWidth > 0 &&
       !partialRebuildStartFailed &&
-      section->currentPage + PARTIAL_REBUILD_START_MARGIN >= static_cast<int>(section->pageCount)) {
+      (remotePositionPending ||
+       section->currentPage + PARTIAL_REBUILD_START_MARGIN >= static_cast<int>(section->pageCount))) {
     RenderLock lock;
     // Reuse the last render's viewport so the extension paginates identically to the partial.
     const ReaderRenderSpec buildSpec = SETTINGS.readerRenderSpec(buildViewportWidth, buildViewportHeight);
@@ -483,6 +493,10 @@ void EpubReaderActivity::loop() {
       // Not fatal: the partial keeps serving its pages; crossing the watermark falls back to
       // the blocking extension in render(). Don't retry every tick.
       partialRebuildStartFailed = true;
+      if (remotePositionPending) {
+        remoteBuildFailed = true;
+        requestUpdate();
+      }
       LOG_ERR("ERS", "Failed to start deferred partial extension build");
     } else {
       LOG_DBG("ERS", "Reader near partial watermark (%d/%d), resuming extension build", section->currentPage,
@@ -513,6 +527,7 @@ void EpubReaderActivity::loop() {
     if (hasBuildWorkInWindow() && buildTickHeapGate()) {
       if (!section->buildSomeMore(BACKGROUND_BUILD_PAGES_PER_TICK, BACKGROUND_BUILD_BUDGET_MS)) {
         LOG_ERR("ERS", "Background section build failed");
+        remoteBuildFailed = remotePositionPending;
         section.reset();
         requestUpdate();
       } else if (section->isBuildComplete() && applyDeferredReposition()) {
@@ -521,6 +536,33 @@ void EpubReaderActivity::loop() {
         requestUpdate();
       }
     }
+  }
+
+  if (remotePositionPending) {
+    if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+      finish();
+      return;
+    }
+    if (!remoteApplyAttempted && section && !section->isBuilding() && !section->isPartial() && !RenderLock::peek()) {
+      RenderLock lock;
+      remoteApplyAttempted = true;
+      DeferredProgress pending;
+      const bool applied = ProgressSyncDeferred::applyForBook(epub->getPath(), renderer);
+      if ((applied || !ProgressSyncDeferred::pendingForBook(epub->getPath(), pending)) &&
+          EpubReaderUtils::loadProgress(epub->getCachePath(), currentSpineIndex, nextPageNumber,
+                                        cachedChapterTotalPageCount, progressEventTimestamp, progressIsLegacy)) {
+        remotePositionPending = false;
+        pageDwell.pageShown(static_cast<uint32_t>(millis()));
+        section.reset();
+        requestUpdate();
+      } else {
+        // Keep the durable raw anchor for reopen; do not repeat failed SD writes every tick.
+        GUI.drawPopup(renderer, tr(STR_SAVE_PROGRESS_FAILED));
+      }
+    }
+    // Back and power remain available while the raw anchor awaits compatible pagination.
+    // Do not stamp/save a placeholder page or count indexing time as reading time.
+    return;
   }
 
   // Bound the debounce window even when the user isn't turning pages: render() only observes a
@@ -1190,7 +1232,7 @@ void EpubReaderActivity::toggleAutoPageTurn(const uint8_t selectedPageTurnOption
 }
 
 void EpubReaderActivity::recordPageDwellTime(const bool isForwardTurn) {
-  if (!SETTINGS.shouldTrackReadingStats()) {
+  if (remotePositionPending || !SETTINGS.shouldTrackReadingStats()) {
     // Still re-baselined so a mid-session setting toggle doesn't read a stale, far-in-the-past
     // timestamp as this page's dwell time -- but nothing below runs, so this costs one millis()
     // call and nothing else.
@@ -1406,6 +1448,10 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     GUI.drawPopup(renderer, tr(STR_INDEX_FAILED));
     automaticPageTurnActive = false;
   };
+  if (remotePositionPending && remoteBuildFailed) {
+    showBuildError();
+    return;
+  }
 
   // edge case handling for sub-zero spine index
   if (currentSpineIndex < 0) {
@@ -1537,7 +1583,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
         // from page 0 (minutes of background CPU + SD writes on a giant spine), pure waste when
         // the reader never nears the watermark this session. loop() starts it lazily once the
         // reader is within PARTIAL_REBUILD_START_MARGIN pages of the watermark.
-        if (section->isPartial() &&
+        if (!remotePositionPending && section->isPartial() &&
             (anchorJump ? section->getPageForAnchor(pendingAnchor).has_value()
                         : target + PARTIAL_REBUILD_START_MARGIN < static_cast<int>(section->pageCount))) {
           LOG_DBG("ERS", "Partial covers target %d of %d; deferring extension build", target, section->pageCount);
@@ -1594,7 +1640,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
             showBuildError();
             return;
           }
-          while (!section->isBuildComplete() &&
+          while (!remotePositionPending && !section->isBuildComplete() &&
                  (anchorJump ? !section->findAnchor(pendingAnchor) : static_cast<int>(section->pageCount) <= target)) {
             // Anchor jump: build until the anchor's page is laid out (usually page 0), checking a
             // partial's on-disk anchor map too so an already-indexed anchor resolves immediately.
@@ -1669,7 +1715,8 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     GUI.drawPopup(renderer, tr(STR_INDEXING));
     pagesUntilFullRefresh = 1;
   }
-  while (section->isPartial() && section->currentPage >= static_cast<int>(section->pageCount)) {
+  while (!remotePositionPending && section->isPartial() &&
+         section->currentPage >= static_cast<int>(section->pageCount)) {
     // Start a build to extend a partial toward the requested page.
     if (!section->isBuilding()) {
       const bool started = section->startBuild(renderSpec);
@@ -1694,7 +1741,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     }
   }
   // For an in-progress incremental build, make sure the page we're about to show has been laid out.
-  if (section->isBuilding()) {
+  if (!remotePositionPending && section->isBuilding()) {
     while (!section->isBuildComplete() && section->currentPage >= static_cast<int>(section->pageCount)) {
       const bool built = section->buildSomeMore(BUILD_PAGES_PER_CHUNK);
       if (lock.isStale()) return;
@@ -1720,6 +1767,11 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   // Apply a deferred settings-change reposition now that the real page count is known (a no-op for
   // a plain resume / unchanged pagination). If still building, this defers to loop() on completion.
   applyDeferredReposition();
+
+  if (remotePositionPending) {
+    GUI.drawPopup(renderer, tr(STR_INDEXING));
+    return;
+  }
 
   renderer.clearScreen();
 
@@ -1947,6 +1999,11 @@ bool EpubReaderActivity::tryQuickResumeWithoutRender() {
 }
 
 bool EpubReaderActivity::flushPendingProgress() {
+  if (remotePositionPending) {
+    APP_STATE.quickResumeSkipRenderEligible = false;
+    APP_STATE.saveToFile();
+    return true;
+  }
   if (!epub || !section) return true;
   if (footnoteDepth > 0) {
     // Mid-footnote: currentSpineIndex/section->currentPage are the footnote's own location, not

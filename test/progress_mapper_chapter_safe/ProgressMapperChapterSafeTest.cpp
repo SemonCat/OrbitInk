@@ -47,21 +47,23 @@ TEST(ProgressMapperChapterSafe, MissingCacheStaysWithinStructuralChapterAndRemai
       /*currentSpineIndex=*/-1, /*totalPagesInCurrentSpine=*/0, /*fallbackTotalPages=*/0, &renderSpec);
 
   EXPECT_EQ(mapped.spineIndex, 1);
-  EXPECT_EQ(mapped.totalPages, 11);
+  EXPECT_EQ(mapped.totalPages, 2);
   EXPECT_GE(mapped.pageNumber, 0);
   EXPECT_LT(mapped.pageNumber, mapped.totalPages);
-  EXPECT_EQ(epub->layoutBuildAttempts(), 1);
-  EXPECT_EQ(epub->finalizedLayoutBuilds(), 1);
-  EXPECT_EQ(epub->normalCssLoadCalls(), 1);
-  EXPECT_EQ(epub->cachedPageCount(1), 11);
+  EXPECT_EQ(epub->layoutBuildAttempts(), 0);
+  EXPECT_EQ(epub->finalizedLayoutBuilds(), 0);
+  EXPECT_EQ(epub->normalCssLoadCalls(), 0);
+  EXPECT_FALSE(epub->cachedPageCount(1).has_value());
 
-  // A subsequent mapper call sees the same finalized compatible denominator and lands on the same
-  // page. This verifies the cache handoff seam, not EpubReaderActivity or physical device startup.
+  // The reader later completes compatible pagination through its budgeted loop. Mapping
+  // consumes that complete cache without doing a second build.
+  epub->setCachedPageCount(1, 11);
   const auto reopened = ProgressMapper::toCrossPoint(
-      epub, {"/body/DocFragment[2]/body/div[1]/section[1]/p[2]/text()[1].3", 0.55f}, renderer);
+      epub, {"/body/DocFragment[2]/body/div[1]/section[1]/p[2]/text()[1].3", 0.55f}, renderer,
+      -1, 0, 0, &renderSpec);
   EXPECT_EQ(reopened.spineIndex, mapped.spineIndex);
-  EXPECT_EQ(reopened.pageNumber, mapped.pageNumber);
-  EXPECT_EQ(reopened.totalPages, mapped.totalPages);
+  EXPECT_EQ(reopened.totalPages, 11);
+  EXPECT_EQ(epub->layoutBuildAttempts(), 0);
 }
 
 TEST(ProgressMapperChapterSafe, FailedLayoutStillUsesCoarseChapterLocalPositionWithoutJumping) {
@@ -79,8 +81,8 @@ TEST(ProgressMapperChapterSafe, FailedLayoutStillUsesCoarseChapterLocalPositionW
   EXPECT_EQ(mapped.totalPages, 2);
   EXPECT_GE(mapped.pageNumber, 0);
   EXPECT_LT(mapped.pageNumber, mapped.totalPages);
-  EXPECT_EQ(epub->normalCssLoadCalls(), 1);
-  EXPECT_EQ(epub->layoutBuildAttempts(), 1);
+  EXPECT_EQ(epub->normalCssLoadCalls(), 0);
+  EXPECT_EQ(epub->layoutBuildAttempts(), 0);
   EXPECT_EQ(epub->finalizedLayoutBuilds(), 0);
 }
 
@@ -189,6 +191,21 @@ TEST(ProgressMapperChapterSafe, OutgoingPositionRoundTripsWithinTheSameChapter) 
   EXPECT_NEAR(saved.percentage, 0.925f, 0.0001f);
   EXPECT_EQ(mapped.spineIndex, 1);
   EXPECT_NEAR(mapped.pageNumber, local.pageNumber, 1);
+}
+
+TEST(ProgressMapperChapterSafe, UncachedChapterStartNeedsNoLayoutOrXhtmlStream) {
+  auto epub = makeBook();
+  GfxRenderer renderer;
+  ReaderRenderSpec spec;
+  spec.viewportWidth = 440;
+  spec.viewportHeight = 720;
+  const auto result = ProgressMapper::toCrossPoint(epub, {"/body/DocFragment[2]/body", 0.02f}, renderer,
+                                                   -1, 0, 0, &spec);
+  EXPECT_EQ(result.spineIndex, 1);
+  EXPECT_EQ(result.pageNumber, 0);
+  EXPECT_EQ(result.totalPages, 0);  // unknown, never a fabricated one-page chapter
+  EXPECT_EQ(epub->layoutBuildAttempts(), 0);
+  EXPECT_EQ(epub->streamCalls(), 0);
 }
 
 }  // namespace

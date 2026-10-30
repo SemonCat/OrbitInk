@@ -10,6 +10,7 @@
 #include <string_view>
 
 #include "CrossPointSettings.h"
+#include "BoundedFileList.h"
 
 namespace {
 constexpr size_t NAME_BUFFER_SIZE = 500;
@@ -33,9 +34,10 @@ struct BookFileInfo {
 }  // namespace
 
 std::vector<LibraryScanner::Entry> LibraryScanner::scanAllBooks(const std::string& root, const size_t maxBooks,
-                                                                const bool collectFingerprint) {
+                                                                const bool collectFingerprint, ScanStats* stats) {
   std::vector<Entry> result;
-  if (maxBooks == 0) {
+  if (stats) *stats = {};
+  if (maxBooks == 0 || root.size() > MAX_SCAN_PATH_BYTES) {
     return result;
   }
   // Reserve conservatively up front; grows normally past this if the card holds more,
@@ -50,11 +52,15 @@ std::vector<LibraryScanner::Entry> LibraryScanner::scanAllBooks(const std::strin
 
   std::vector<std::string> pendingDirs;
   pendingDirs.push_back(root);
+  size_t pendingBytes = sizeof(std::string) + root.size();
+  size_t resultBytes = 0;
   bool truncated = false;
+  bool budgetExceeded = false;
 
   while (!pendingDirs.empty() && !truncated) {
     const std::string dirPath = std::move(pendingDirs.back());
     pendingDirs.pop_back();
+    pendingBytes -= sizeof(std::string) + dirPath.size();
 
     auto dir = Storage.open(dirPath.c_str());
     if (!dir || !dir.isDirectory()) {
@@ -64,6 +70,14 @@ std::vector<LibraryScanner::Entry> LibraryScanner::scanAllBooks(const std::strin
 
     std::vector<std::string> subDirs;
     std::vector<BookFileInfo> bookFiles;
+    std::optional<BookFileInfo> bookCutoff;
+    std::optional<std::string> dirCutoff;
+    size_t bookBytes = 0;
+    size_t dirBytes = 0;
+    const auto fileLess = [](const BookFileInfo& a, const BookFileInfo& b) {
+      return FsHelpers::naturalLess(a.name, b.name);
+    };
+    const auto dirLess = [](const std::string& a, const std::string& b) { return FsHelpers::naturalLess(a, b); };
     for (auto file = dir.openNextFile(); file; file = dir.openNextFile()) {
       file.getName(nameBuffer.get(), NAME_BUFFER_SIZE);
       if ((!SETTINGS.showHiddenFiles && nameBuffer[0] == '.') ||
@@ -71,7 +85,13 @@ std::vector<LibraryScanner::Entry> LibraryScanner::scanAllBooks(const std::strin
         continue;
       }
       if (file.isDirectory()) {
-        subDirs.emplace_back(nameBuffer.get());
+        const auto path = joinPath(dirPath, nameBuffer.get());
+        if (path.size() > MAX_SCAN_PATH_BYTES ||
+            !retainFileEntry(subDirs, dirCutoff, path, dirBytes, MAX_PENDING_DIRS - pendingDirs.size(),
+                             DIRECTORY_BYTE_BUDGET - pendingBytes, dirLess,
+                             [](const std::string& s) { return sizeof(s) + s.size(); })) {
+          budgetExceeded = true;
+        }
       } else if (isBookFile(nameBuffer.get())) {
         BookFileInfo info;
         info.name = nameBuffer.get();
@@ -83,7 +103,15 @@ std::vector<LibraryScanner::Entry> LibraryScanner::scanAllBooks(const std::strin
             info.fatDateTime = (static_cast<uint32_t>(fatDate) << 16) | fatTime;
           }
         }
-        bookFiles.push_back(std::move(info));
+        if (!retainFileEntry(bookFiles, bookCutoff, std::move(info), bookBytes, maxBooks - result.size(),
+                             DIRECTORY_BYTE_BUDGET, fileLess,
+                             [](const BookFileInfo& f) { return sizeof(f) + f.name.size(); })) {
+          budgetExceeded = true;
+        }
+      }
+      if (stats) {
+        stats->directoryEntries = std::max(stats->directoryEntries, bookFiles.size() + subDirs.size());
+        stats->directoryBytes = std::max(stats->directoryBytes, bookBytes + dirBytes);
       }
     }
     dir.close();
@@ -97,18 +125,34 @@ std::vector<LibraryScanner::Entry> LibraryScanner::scanAllBooks(const std::strin
         truncated = true;
         break;
       }
-      result.push_back(Entry{joinPath(dirPath, info.name), info.size, info.fatDateTime});
+      auto path = joinPath(dirPath, info.name);
+      const size_t entryBytes = sizeof(Entry) + path.size();
+      if (path.size() > MAX_SCAN_PATH_BYTES || resultBytes + entryBytes > RESULT_BYTE_BUDGET) {
+        truncated = true;
+        break;
+      }
+      resultBytes += entryBytes;
+      result.push_back(Entry{std::move(path), info.size, info.fatDateTime});
     }
 
     // Push in reverse so the worklist (a LIFO stack) still visits subfolders in
     // ascending name order.
     for (auto it = subDirs.rbegin(); it != subDirs.rend(); ++it) {
-      pendingDirs.push_back(joinPath(dirPath, *it));
+      pendingBytes += sizeof(std::string) + it->size();
+      pendingDirs.push_back(std::move(*it));
+    }
+    if (stats) {
+      stats->pendingDirectories = std::max(stats->pendingDirectories, pendingDirs.size());
+      stats->pendingBytes = std::max(stats->pendingBytes, pendingBytes);
     }
   }
 
-  if (truncated) {
-    LOG_INF("LIBSCAN", "Library scan capped at %d books; the SD card holds more", static_cast<int>(maxBooks));
+  if (stats) {
+    stats->resultBytes = resultBytes;
+    stats->capped = truncated || budgetExceeded;
+  }
+  if (truncated || budgetExceeded) {
+    LOG_INF("LIBSCAN", "Library scan capped by entry/path memory budget (%d books returned)", static_cast<int>(result.size()));
   }
 
   return result;

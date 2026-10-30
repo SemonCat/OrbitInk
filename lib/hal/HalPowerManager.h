@@ -14,15 +14,21 @@ class HalPowerManager;
 extern HalPowerManager powerManager;  // Singleton
 
 class HalPowerManager {
+ public:
+  class Lock;
+
+ private:
   int normalFreq = 0;  // MHz
   bool isLowPower = false;
 
   mutable int _batteryCachedPercent = 0;         // Last read battery percentage (0-100)
   mutable unsigned long _batteryLastPollMs = 0;  // Timestamp of last battery read in milliseconds
 
-  enum LockMode { None, NormalSpeed };
-  LockMode currentLockMode = None;
-  SemaphoreHandle_t modeMutex = nullptr;  // Protect access to currentLockMode
+  Lock* locks = nullptr;
+  TaskHandle_t busyTask = nullptr;
+  unsigned busyDepth = 0;
+  SemaphoreHandle_t modeMutex = nullptr;
+  void updateFrequency(bool idle);
 
  public:
 #if BOARD_HAS_PSRAM
@@ -40,8 +46,8 @@ class HalPowerManager {
 
   // Plain function-pointer hooks for EInkDisplay::setBusyWaitHooks (installed by
   // HalDisplay::begin()). No capture/context available at that call site, so these are static and
-  // reach the singleton directly. Just forward to setPowerSaving(), so they inherit its existing
-  // Lock/WiFi gating -- no separate state to keep in sync.
+  // reach the singleton directly. Only locks owned by the waiting task are suspended;
+  // another task's lock and an active radio still require normal speed.
   static void beginDisplayBusyWait();
   static void endDisplayBusyWait();
 
@@ -57,7 +63,8 @@ class HalPowerManager {
   // full performance. When the Lock instance is destroyed (goes out of scope), power saving will be re-enabled.
   class Lock {
     friend class HalPowerManager;
-    bool valid = false;
+    Lock* next = nullptr;
+    TaskHandle_t owner = nullptr;
 
    public:
     explicit Lock();

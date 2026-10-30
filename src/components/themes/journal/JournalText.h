@@ -43,13 +43,21 @@ template <typename Measure>
 std::string truncateToWidth(const std::string& text, const int maxWidth, const Measure& measure) {
   if (measure(text) <= maxWidth) return text;
   const auto b = utf8Boundaries(text);
-  for (size_t n = b.size() - 1; n > 0; n--) {
-    std::string candidate = text.substr(0, b[n - 1]);
+  size_t lo = 0, hi = b.size() - 1;
+  std::string best = kEllipsis;
+  while (lo < hi) {
+    const size_t n = lo + (hi - lo) / 2;
+    std::string candidate = text.substr(0, b[n]);
     while (!candidate.empty() && candidate.back() == ' ') candidate.pop_back();
     candidate += kEllipsis;
-    if (measure(candidate) <= maxWidth) return candidate;
+    if (measure(candidate) <= maxWidth) {
+      best = std::move(candidate);
+      lo = n + 1;
+    } else {
+      hi = n;
+    }
   }
-  return kEllipsis;
+  return best;
 }
 
 template <typename Measure>
@@ -70,10 +78,15 @@ std::vector<std::string> wrapTitle(const std::string& text, const int maxWidth, 
     }
     // Longest codepoint prefix that fits; prefer the last space inside it.
     const auto b = utf8Boundaries(rest);
-    size_t fit = 0;  // index into b of the end of the fitting prefix
-    for (size_t n = 1; n < b.size(); n++) {
-      if (measure(rest.substr(0, b[n])) > maxWidth) break;
-      fit = n;
+    size_t fit = 0;
+    size_t hi = b.size() - 1;
+    while (fit < hi) {
+      const size_t mid = fit + (hi - fit + 1) / 2;
+      if (measure(rest.substr(0, b[mid])) <= maxWidth) {
+        fit = mid;
+      } else {
+        hi = mid - 1;
+      }
     }
     if (fit == 0) fit = 1;  // a single glyph wider than the line still advances
     size_t cut = b[fit];

@@ -62,7 +62,7 @@ void LibraryIndexRebuildActivity::beginBuild() {
   // this device.
   int coverWidth = 0;
   int coverHeight = 0;
-  if (SETTINGS.fileBrowserView == CrossPointSettings::FILE_BROWSER_COVERS) {
+  if (!isAutoMode() && SETTINGS.fileBrowserView == CrossPointSettings::FILE_BROWSER_COVERS) {
     const CoverGridGeometry::Geometry g = CoverGridGeometry::compute(renderer);
     coverWidth = g.coverWidth;
     coverHeight = g.coverHeight;

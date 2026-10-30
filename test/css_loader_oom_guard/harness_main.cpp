@@ -232,6 +232,28 @@ void runReadFailure() {
   require(!parser.saveToCache(), "read-failed parse was cacheable");
 }
 
+void runDeterministicLimits() {
+  HalStorage::resetTestFiles();
+  std::string css;
+  for (size_t i = 0; i < 1600; ++i) css += ".r" + std::to_string(i) + "{text-align:center}";
+  CssParser parser(kCachePathBase);
+  HalFile source = openCss(css);
+  require(parser.loadFromStream(source) == CssParser::ParseResult::Limited, "rule cap was not deterministic");
+  require(parser.ruleCount() == 1500, "bounded rules were lost");
+  require(parser.saveToCache(), "bounded rules were not persisted");
+  require(HalStorage::readTestFile(kCacheFile)[0] == CssParser::CSS_LIMITED_CACHE_VERSION,
+          "degradation was not recorded");
+  parser.clear();
+  require(parser.validateCache() == CssParser::CacheStatus::Complete, "bounded cache did not validate");
+  require(parser.loadFromCache() == CssParser::CacheLoadResult::Complete, "bounded cache did not reload");
+  require(parser.ruleCount() == 1500, "bounded cache changed on warm load");
+  parser.clear();
+  parser.markLimited();  // Entire stylesheet skipped at the EPUB size gate.
+  require(parser.saveToCache(), "empty deterministic fallback was not persisted");
+  require(parser.loadFromCache() == CssParser::CacheLoadResult::Complete, "empty fallback was not usable");
+  require(parser.empty(), "empty fallback acquired styles");
+}
+
 void runSemantics() {
   HalStorage::resetTestFiles();
   const std::string css =
@@ -295,6 +317,7 @@ int main(int argc, char** argv) {
   else if (mode == "warm-sweep") runAllocationSweep(false);
   else if (mode == "book-shape") runBookShape();
   else if (mode == "read-failure") runReadFailure();
+  else if (mode == "deterministic-limits") runDeterministicLimits();
   else if (mode == "semantics") runSemantics();
   else if (mode == "cache-integrity") runCacheIntegrity();
   else {

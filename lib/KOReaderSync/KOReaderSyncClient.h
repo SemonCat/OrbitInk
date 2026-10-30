@@ -114,6 +114,7 @@ class KOReaderSyncClient {
   class Session {
    public:
     Session();
+    void end();
     // Test-only: inject a fake transport instead of the real SecureHttpClient-backed one.
     explicit Session(std::unique_ptr<KOSyncTransport> transport);
     ~Session();

@@ -26,6 +26,8 @@
 #include "ProgressPullPolicy.h"
 #include "ProgressSyncDeferred.h"
 #include "ProgressSyncRetry.h"
+#include "ProgressSyncPosition.h"
+#include "ProgressSyncNetwork.h"
 #include "WifiCredentialStore.h"
 #include "activities/reader/EpubReaderUtils.h"
 
@@ -36,7 +38,6 @@ namespace {
 // Direct connect to the last-known network, no scan -- a scan alone can cost several seconds,
 // which this path can't afford. Bounded and abortable so a sleep transition or a book-open can
 // never be stuck waiting on a network that isn't there.
-constexpr unsigned long WIFI_CONNECT_TIMEOUT_MS = 3500;
 std::atomic<bool> pendingSuccessNotice{false};
 
 bool userRequestedAbort() {
@@ -48,40 +49,11 @@ bool userRequestedAbort() {
 // credential exists, so a false return here always means "attempted and failed/timed out/aborted"
 // -- never "never tried."
 bool connectToSavedWifi() {
-  if (WIFI_STORE.getCredentialCount() == 0) return false;
-
-  std::optional<WifiCredential> cred;
-  const std::string lastSsid = WIFI_STORE.getLastConnectedSsid();
-  if (!lastSsid.empty()) {
-    cred = WIFI_STORE.findCredential(lastSsid);
-  }
-  if (!cred) {
-    cred = WIFI_STORE.getCredentialAt(0);
-  }
-  if (!cred) return false;
-
-  WiFi.mode(WIFI_STA);
-  if (cred->password.empty()) {
-    WiFi.begin(cred->ssid.c_str());
-  } else {
-    WiFi.begin(cred->ssid.c_str(), cred->password.c_str());
-  }
-
-  const unsigned long deadline = millis() + WIFI_CONNECT_TIMEOUT_MS;
-  while (WiFi.status() != WL_CONNECTED) {
-    if (millis() >= deadline || userRequestedAbort()) {
-      LOG_DBG("KOAuto", "WiFi connect timed out or aborted");
-      return false;
-    }
-    delay(50);
-  }
+  if (!ProgressSyncNetwork::connect()) return false;
   return true;
 }
 
-void disconnectWifi() {
-  WiFi.disconnect(true);
-  WiFi.mode(WIFI_OFF);
-}
+void disconnectWifi() { ProgressSyncNetwork::disconnect(); }
 
 // buildIfMissing=true: a book being pulled for the first time on this device has no book.bin cache
 // yet, and a real spine build is the only way calculateProgress()/ProgressMapper get usable spine
@@ -93,8 +65,9 @@ bool loadEpubForSync(Epub& epub, bool buildIfMissing) {
 }
 
 std::string computeDocumentHash(const std::string& path) {
-  return KOReaderDocumentId::calculateForProgress(path,
-                                                  KOREADER_STORE.getMatchMethod() == DocumentMatchMethod::FILENAME);
+  return KOREADER_STORE.getMatchMethod() == DocumentMatchMethod::FILENAME
+             ? KOReaderDocumentId::calculateForProgress(path, true)
+             : ProgressSyncNetwork::binaryDocument(path);
 }
 
 void recordSuccessfulSync(bool queueNotice) {
@@ -137,7 +110,7 @@ void uploadBookOrbitStats(GfxRenderer& renderer, const std::string& epubPath) {
   // Checked before deriving the identity: calculateForStats() reads chunks from the book file,
   // and a device with no BookOrbit credentials configured should not pay for that.
   if (!BookOrbitStats::drainPossible()) return;
-  const std::string statsHash = KOReaderDocumentId::calculateForStats(epubPath);
+  const std::string statsHash = ProgressSyncNetwork::binaryDocument(epubPath);
   if (statsHash.empty()) return;
 
   if (auto* fcm = renderer.getFontCacheManager()) fcm->forceReleaseTransientCaches();
@@ -201,7 +174,10 @@ ProgressSyncRetry::Outcome synchronizeProgress(const std::string& epubPath, GfxR
   SavedProgressPosition saved;
   if (hasLocal) {
     localPercentage = epub->calculateProgress(spineIndex, static_cast<float>(pageNumber) / pageCount);
-    saved = ProgressMapper::toSavedProgress(epub, CrossPointPosition{spineIndex, pageNumber, pageCount});
+    const std::string binaryDocument =
+        matchMethod == DocumentMatchMethod::FILENAME ? ProgressSyncNetwork::binaryDocument(epubPath) : hash;
+    saved = ProgressSyncPosition::resolve(epub, CrossPointPosition{spineIndex, pageNumber, pageCount},
+                                           binaryDocument, renderer);
     if (!std::isfinite(localPercentage) || localPercentage < 0.0f || localPercentage > 1.0f || saved.xpath.empty()) {
       LOG_ERR("KOAuto", "Sync: invalid local progress; treating it as absent");
       hasLocal = false;
@@ -305,6 +281,7 @@ ProgressSyncRetry::Outcome synchronizeProgress(const std::string& epubPath, GfxR
 
   if (action == SyncAction::PullRemote) {
     const bool staged = ProgressSyncDeferred::stage(remoteCandidate);
+    session.end();
     if (!progressOnly) uploadBookOrbitStats(*renderer, epubPath);
     disconnectWifi();
     if (!staged) return finish(Outcome::Retry);
@@ -312,12 +289,14 @@ ProgressSyncRetry::Outcome synchronizeProgress(const std::string& epubPath, GfxR
   }
 
   if (action == SyncAction::HoldUnknown || action == SyncAction::Abort) {
+    session.end();
     if (!progressOnly) uploadBookOrbitStats(*renderer, epubPath);
     disconnectWifi();
     return finish(Outcome::NoRetry);
   }
 
   if (action != SyncAction::PushLocal) {
+    session.end();
     if (!progressOnly) uploadBookOrbitStats(*renderer, epubPath);
     disconnectWifi();
     return finish(Outcome::Confirmed);
@@ -358,6 +337,7 @@ ProgressSyncRetry::Outcome synchronizeProgress(const std::string& epubPath, GfxR
   // Strictly after the progress upload has been confirmed, and on the same Session, so the
   // reused TLS connection is paid for once. A stats failure cannot reach the return value.
   const auto outcome = finish(ProgressSyncRetry::classify<KOReaderSyncClient>(putResult, session.lastHttpCode()));
+  session.end();
   if (putResult == KOReaderSyncClient::OK && !progressOnly) uploadBookOrbitStats(*renderer, epubPath);
   disconnectWifi();
   return outcome;
@@ -380,7 +360,7 @@ void syncOnSleep(GfxRenderer& renderer) {
     recordSuccessfulSync(false);
   }
   // synchronizeProgress's Session and TLS transport have been destroyed before layout work.
-  ProgressSyncDeferred::applyForBook(path, renderer);
+  if (!ProgressSyncNetwork::active()) ProgressSyncDeferred::applyForBook(path, renderer);
 }
 
 void syncHeadlessly(const std::string& epubPath) {
@@ -396,7 +376,7 @@ void syncOnClose(GfxRenderer& renderer) {
                           /*progressOnly=*/false) == ProgressSyncRetry::Outcome::Confirmed) {
     recordSuccessfulSync(true);
   }
-  ProgressSyncDeferred::applyForBook(path, renderer);
+  if (!ProgressSyncNetwork::active()) ProgressSyncDeferred::applyForBook(path, renderer);
 }
 
 void syncOnOpen(const std::string& epubPath, GfxRenderer& renderer) {
@@ -404,7 +384,7 @@ void syncOnOpen(const std::string& epubPath, GfxRenderer& renderer) {
                           /*progressOnly=*/false) == ProgressSyncRetry::Outcome::Confirmed) {
     recordSuccessfulSync(true);
   }
-  ProgressSyncDeferred::applyForBook(epubPath, renderer);
+  if (!ProgressSyncNetwork::active()) ProgressSyncDeferred::applyForBook(epubPath, renderer);
 }
 
 bool consumeSuccessNotice() { return pendingSuccessNotice.exchange(false, std::memory_order_acq_rel); }

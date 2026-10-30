@@ -29,13 +29,14 @@ class Epub {
   std::unique_ptr<CssParser> cssParser;
   // CSS files
   std::vector<std::string> cssFiles;
+  mutable int validatedHtmlSpine = -1;
 
   bool findContentOpfFile(std::string* contentOpfFile) const;
   bool parseContentOpf(BookMetadataCache::BookMetadata& bookMetadata, bool writeSpineEntries = true);
   bool parseTocNcxFile() const;
   bool parseTocNavFile() const;
   void discoverCssFilesFromZip();
-  void parseCssFiles() const;
+  bool parseCssFiles() const;
   // Shared by both generateThumbBmp() overloads: decodes the cover image and
   // writes it to outputPath at (targetWidth, targetHeight), cover-cropped or
   // letterbox-contained per `crop`. Writes an empty placeholder on failure so
@@ -89,6 +90,8 @@ class Epub {
                                    bool trailingNullByte = false) const;
   bool readItemContentsToStream(const std::string& itemHref, Print& out, size_t chunkSize,
                                 bool allowEarlyStop = false) const;
+  // Reuse extracted chapter HTML only after checking its CRC against the current archive.
+  bool readSpineContentsToStream(int spineIndex, Print& out, size_t chunkSize, bool allowEarlyStop = false) const;
   // Extract an item to a file on SD. On failure the partial file is removed.
   bool extractItemToFile(const std::string& itemHref, const std::string& destPath) const;
   bool getItemSize(const std::string& itemHref, size_t* size) const;

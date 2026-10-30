@@ -14,6 +14,8 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/BookCacheUtils.h"
+#include "util/BoundedFileList.h"
+#include "util/LibraryScanner.h"
 
 namespace {
 constexpr unsigned long GO_HOME_MS = 1000;
@@ -36,6 +38,19 @@ void FileBrowserActivity::loadFiles() {
     return;
   }
 
+  size_t retainedBytes = 0;
+  std::optional<std::string> cutoff;
+  bool capped = false;
+  const auto less = [](const std::string& a, const std::string& b) {
+    const bool aDir = !a.empty() && a.back() == '/';
+    const bool bDir = !b.empty() && b.back() == '/';
+    return aDir != bDir ? aDir : FsHelpers::naturalLess(a, b);
+  };
+  const auto retain = [&](std::string name) {
+    if (!retainFileEntry(files, cutoff, std::move(name), retainedBytes, LibraryScanner::MAX_LIBRARY_BOOKS,
+                         LibraryScanner::RESULT_BYTE_BUDGET, less,
+                         [](const std::string& s) { return sizeof(s) + s.size(); })) capped = true;
+  };
   for (auto file = root.openNextFile(); file; file = root.openNextFile()) {
     file.getName(fileNameBuffer.get(), NAME_BUFFER_SIZE);
     if ((!SETTINGS.showHiddenFiles && fileNameBuffer[0] == '.') ||
@@ -44,23 +59,24 @@ void FileBrowserActivity::loadFiles() {
     }
 
     if (file.isDirectory()) {
-      files.emplace_back(std::string(fileNameBuffer.get()) + "/");
+      retain(std::string(fileNameBuffer.get()) + "/");
     } else {
       std::string_view filename{fileNameBuffer.get()};
       if (mode == Mode::PickFirmware) {
         // Firmware picker: only show .bin files.
         if (FsHelpers::checkFileExtension(filename, ".bin")) {
-          files.emplace_back(filename);
+          retain(std::string(filename));
         }
       } else if (FsHelpers::hasEpubExtension(filename) || FsHelpers::hasXtcExtension(filename) ||
                  FsHelpers::hasTxtExtension(filename) || FsHelpers::hasMarkdownExtension(filename) ||
                  FsHelpers::hasBmpExtension(filename)) {
-        files.emplace_back(filename);
+        retain(std::string(filename));
       }
     }
   }
   root.close();
   FsHelpers::sortFileList(files);
+  if (capped) LOG_INF("FileBrowser", "Directory listing capped by entry/path memory budget");
 }
 
 void FileBrowserActivity::onEnter() {

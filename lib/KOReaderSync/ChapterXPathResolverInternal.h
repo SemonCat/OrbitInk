@@ -124,14 +124,15 @@ class BoundedHtmlScanner : public Print {
   bool finish() { return true; }
 
   size_t write(uint8_t c) override {
-    if (stopped_) return 1;
+    if (stopped_) return 0;
     processByte(c);
     return 1;
   }
 
   size_t write(const uint8_t* buffer, size_t size) override {
-    for (size_t i = 0; i < size && !stopped_; i++) processByte(buffer[i]);
-    return size;
+    size_t consumed = 0;
+    while (consumed < size && !stopped_) processByte(buffer[consumed++]);
+    return consumed;
   }
 
  protected:

@@ -15,6 +15,7 @@ class Section {
 
   std::optional<uint16_t> getCachedPageCount() const { return epub_->cachedPageCount(spineIndex_); }
   bool loadSectionFile(const ReaderRenderSpec&) {
+    if (!Epub::compatibleLayout) return false;
     const auto count = epub_->cachedPageCount(spineIndex_);
     if (!count) return false;
     pageCount = *count;
@@ -29,7 +30,8 @@ class Section {
     return true;
   }
   uint16_t estimatedTotalPages() const { return pageCount; }
-  bool isPartial() const { return false; }
+  bool isPartial() const { return Epub::partialLayout; }
+  std::optional<uint16_t> getParagraphIndexForPage(int page) const { return page + 1; }
   std::optional<uint16_t> getPageForParagraphIndex(uint16_t paragraph) const {
     return epub_->pageForParagraph(spineIndex_, paragraph);
   }

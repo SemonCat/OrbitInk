@@ -3,14 +3,9 @@
 
 class GfxRenderer;
 
-// Independent bidirectional BookOrbit progress sync, plus a fallback drain of
-// the reading-stats queue on the same session/connection. A wholly separate WiFi connect/
-// disconnect cycle from KOReaderAutoSync (KOReaderAutoSync.h): BookOrbit is a standalone provider
-// (own credentials, own server, and commonly configured with no generic KOSync at all), so this
-// cannot assume KOReaderAutoSync's own trigger ran this wake, or that a connection is already
-// open. See docs/bookorbit-feature-matrix.md's Phase 3 section for the double-WiFi-connect cost
-// this accepts on a device with BOTH providers configured, in exchange for zero changes to
-// KOReaderAutoSync's own, already-shipped push/pull bodies.
+// Independent bidirectional BookOrbit progress sync and stats/bookmark drain. Automatic paired
+// events share a saved-network interval via ProgressSyncNetwork::Batch. Standalone calls still
+// own their radio lifecycle and remain independent of KOReader credentials or availability.
 //
 // A no-op (no radio, no delay) unless BookOrbitCredentialStore has credentials configured --
 // independent of KOReaderCredentialStore's own state. When only KOSync is configured (no

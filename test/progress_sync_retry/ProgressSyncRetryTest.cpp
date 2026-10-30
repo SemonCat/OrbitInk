@@ -402,8 +402,11 @@ TEST(ProgressSyncRetry, ProviderHardwarePathsValidateBeforeWifiAndSuppressSideWo
     EXPECT_NE(body.find("ProgressSyncDeferred::stage(remoteCandidate)"), std::string::npos);
     EXPECT_NE(text.find("synchronizeProgress(epubPath, nullptr"), std::string::npos);
     EXPECT_EQ(text.find("scanNetworks("), std::string::npos);
-    EXPECT_NE(text.find("WIFI_CONNECT_TIMEOUT_MS = 3500"), std::string::npos);
+    EXPECT_NE(text.find("ProgressSyncNetwork::connect()"), std::string::npos);
   }
+  const auto network = source("/src/util/ProgressSyncNetwork.cpp");
+  EXPECT_NE(network.find("millis() - start >= 3500"), std::string::npos);
+  EXPECT_EQ(network.find("scanNetworks("), std::string::npos);
 }
 
 TEST(ProgressSyncRetry, DeferredApplyOccursAfterProviderTransactionReturnsAndInvalidatesSnapshot) {

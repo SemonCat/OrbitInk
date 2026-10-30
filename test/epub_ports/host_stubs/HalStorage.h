@@ -15,6 +15,7 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+#include <Print.h>
 
 using oflag_t = unsigned;
 constexpr oflag_t O_RDONLY = 0x01;
@@ -22,7 +23,7 @@ constexpr oflag_t O_WRITE = 0x02;
 constexpr oflag_t O_CREAT = 0x04;
 constexpr oflag_t O_TRUNC = 0x08;
 
-class HalFile {
+class HalFile : public Print {
  public:
   HalFile() = default;
   HalFile(HalFile&&) noexcept = default;
@@ -31,6 +32,21 @@ class HalFile {
   HalFile& operator=(const HalFile&) = delete;
 
   explicit operator bool() const { return backing_ != nullptr; }
+  bool isDirectory() const { return backing_ && backing_->directory; }
+  void rewindDirectory() { child_ = 0; }
+  HalFile openNextFile() {
+    if (!backing_ || child_ >= backing_->children.size()) return {};
+    return HalFile(backing_->children[child_++], false);
+  }
+  bool getName(char* out, size_t size) const {
+    if (!backing_ || size == 0) return false;
+    const auto slash = backing_->name.find_last_of('/');
+    const std::string name = backing_->name.substr(slash == std::string::npos ? 0 : slash + 1);
+    std::strncpy(out, name.c_str(), size - 1);
+    out[size - 1] = 0;
+    return name.size() < size;
+  }
+  bool getModifyTime(uint16_t& date, uint16_t& time) const { date = time = 0; return false; }
 
   size_t fileSize() const { return backing_ ? backing_->bytes.size() : 0; }
   size_t size() const { return fileSize(); }
@@ -78,7 +94,8 @@ class HalFile {
     return amount;
   }
 
-  size_t write(uint8_t byte) { return write(&byte, sizeof(byte)); }
+  size_t write(const uint8_t* source, size_t amount) override { return write(static_cast<const void*>(source), amount); }
+  size_t write(uint8_t byte) override { return write(&byte, sizeof(byte)); }
 
   bool close() {
     const bool ok = !backing_ || !backing_->failClose;
@@ -90,6 +107,9 @@ class HalFile {
 
  private:
   struct Backing {
+    std::string name;
+    bool directory = false;
+    std::vector<std::shared_ptr<Backing>> children;
     std::vector<uint8_t> bytes;
     size_t failReadAt = std::numeric_limits<size_t>::max();
     size_t failWriteAt = std::numeric_limits<size_t>::max();
@@ -106,6 +126,7 @@ class HalFile {
   std::shared_ptr<Backing> backing_;
   size_t position_ = 0;
   bool writable_ = false;
+  size_t child_ = 0;
 };
 
 class HalStorage {
@@ -115,7 +136,16 @@ class HalStorage {
     return instance;
   }
 
-  bool mkdir(const char*, bool = true) { return true; }
+  bool mkdir(const char*, bool = true) { ++mkdirCalls_; return true; }
+  bool removeDir(const char* path) {
+    ++removeDirCalls_;
+    const std::string prefix = std::string(path) + "/";
+    for (auto it = files_.begin(); it != files_.end();) {
+      if (it->first == path || it->first.rfind(prefix, 0) == 0) it = files_.erase(it);
+      else ++it;
+    }
+    return true;
+  }
   bool exists(const std::string& path) const { return exists(path.c_str()); }
   bool exists(const char* path) const { return path != nullptr && files_.find(path) != files_.end(); }
 
@@ -181,14 +211,26 @@ class HalStorage {
     storage.writeOpenFailures_.clear();
     storage.writeFailureOffsets_.clear();
     storage.closeFailures_.clear();
+    storage.mkdirCalls_ = storage.removeDirCalls_ = 0;
   }
 
   static void registerTestFile(const std::string& path, std::vector<uint8_t> bytes) {
     auto& storage = getInstance();
     auto backing = std::make_shared<HalFile::Backing>();
+    backing->name = path;
     backing->bytes = std::move(bytes);
     storage.files_[path] = std::move(backing);
   }
+  static void registerTestDirectory(const std::string& path, const std::vector<std::string>& children) {
+    auto& storage = getInstance();
+    auto backing = std::make_shared<HalFile::Backing>();
+    backing->name = path;
+    backing->directory = true;
+    for (const auto& child : children) backing->children.push_back(storage.files_.at(child));
+    storage.files_[path] = std::move(backing);
+  }
+  static size_t mkdirCalls() { return getInstance().mkdirCalls_; }
+  static size_t removeDirCalls() { return getInstance().removeDirCalls_; }
 
   static bool hasTestFile(const std::string& path) { return getInstance().exists(path.c_str()); }
 
@@ -241,6 +283,8 @@ class HalStorage {
   static void allowWriteOpen(const std::string& path) { getInstance().writeOpenFailures_.erase(path); }
 
  private:
+  size_t mkdirCalls_ = 0;
+  size_t removeDirCalls_ = 0;
   std::unordered_map<std::string, std::shared_ptr<HalFile::Backing>> files_;
   std::unordered_map<std::string, size_t> readOpenAttempts_;
   std::unordered_map<std::string, size_t> writeOpenAttempts_;

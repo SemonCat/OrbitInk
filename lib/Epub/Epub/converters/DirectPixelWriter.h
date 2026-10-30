@@ -4,6 +4,7 @@
 #include <HalDisplay.h>
 #include <stdint.h>
 
+#include <algorithm>
 #include <cassert>
 
 // Direct framebuffer writer that eliminates per-pixel overhead from the image
@@ -99,6 +100,23 @@ struct DirectPixelWriter {
   inline void beginRow(int logicalY) {
     rowPhyXBase = phyXBase + logicalY * phyXStepY;
     rowPhyYBase = phyYBase + logicalY * phyYStepY;
+  }
+
+  // Landscape bands intersect whole logical rows. Clip before reading the row payload;
+  // portrait bands intersect columns of every row and still need the full row stride.
+  inline void bandRowRange(int yBase, int height, int& first, int& end) const {
+    first = 0;
+    end = height;
+    if (phyYStepX != 0) return;
+    if (phyYStepY > 0) {
+      first = originY - phyYBase - yBase;
+      end = originY + clipRows - phyYBase - yBase;
+    } else {
+      first = phyYBase - yBase - (originY + clipRows - 1);
+      end = phyYBase - yBase - originY + 1;
+    }
+    first = std::max(0, std::min(height, first));
+    end = std::max(first, std::min(height, end));
   }
 
   // For the current row (set via beginRow), narrow [colStart, colEnd) to the

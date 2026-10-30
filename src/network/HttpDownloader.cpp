@@ -41,6 +41,21 @@ struct Sink {
   bool* cancelFlag = nullptr;
   size_t total = 0;
   size_t downloaded = 0;
+  unsigned long lastPollMs = 0;
+  bool polled = false;
+
+  bool poll(const bool reportBytes = false) {
+    if (cancelFlag && *cancelFlag) return true;
+    const unsigned long now = millis();
+    // Callers poll their input in this callback. Run it even before headers and during
+    // body stalls, independently of Content-Length and arrival of the next data chunk.
+    if (progress && (reportBytes || !polled || now - lastPollMs >= 25)) {
+      lastPollMs = now;
+      polled = true;
+      progress(downloaded, total);
+    }
+    return cancelFlag && *cancelFlag;
+  }
 };
 
 bool isRedirect(int status) {
@@ -56,6 +71,7 @@ HttpDownloader::DownloadError runGetWolf(const std::string& startUrl, const std:
   const HttpRedirectPolicy::RedirectAuthTracker authTracker(startUrl);
 
   for (int hop = 0; hop <= MAX_REDIRECTS; ++hop) {
+    if (sink.poll()) return HttpDownloader::ABORTED;
     freeink::SecureHttpClient http;
     http.setTimeout(HTTP_TIMEOUT_MS);
     http.setInsecure();
@@ -97,12 +113,12 @@ HttpDownloader::DownloadError runGetWolf(const std::string& startUrl, const std:
           if (sink.total == 0 && http.hasContentLength()) sink.total = http.getContentLength();
           if (!sink.write(data, len)) return false;
           sink.downloaded += len;
-          if (sink.progress && sink.total > 0) sink.progress(sink.downloaded, sink.total);
+          sink.poll(true);
           return true;
         },
-        [&sink]() { return sink.cancelFlag && *sink.cancelFlag; });
+        [&sink]() { return sink.poll(); });
 
-    if (http.aborted()) return HttpDownloader::ABORTED;
+    if ((sink.cancelFlag && *sink.cancelFlag) || http.aborted()) return HttpDownloader::ABORTED;
     if (status < 0) {
       LOG_ERR("HTTP", "wolfSSL request failed: %s", url.c_str());
       HttpDownloader::lastHttpStatus = 0;
@@ -150,6 +166,7 @@ HttpDownloader::DownloadError runGetWolf(const std::string& startUrl, const std:
 // large/slow files and surfaces a short read directly.
 HttpDownloader::DownloadError runGet(const std::string& url, const std::string& username, const std::string& password,
                                      const HttpDownloader::HeaderList& extraHeaders, Sink& sink) {
+  if (sink.poll()) return HttpDownloader::ABORTED;
   esp_http_client_config_t config = {};
   config.url = url.c_str();
   config.buffer_size = HTTP_RX_BUF;
@@ -209,6 +226,10 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
   }
 
   HttpDownloader::lastHttpStatus = status;
+  if (sink.poll()) {
+    esp_http_client_cleanup(client);
+    return HttpDownloader::ABORTED;
+  }
   if (status != 200) {
     LOG_ERR("HTTP", "unexpected status: %d", status);
     esp_http_client_cleanup(client);
@@ -227,7 +248,7 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
   }
 
   while (true) {
-    if (sink.cancelFlag && *sink.cancelFlag) {
+    if (sink.poll()) {
       esp_http_client_cleanup(client);
       return HttpDownloader::ABORTED;
     }
@@ -243,7 +264,7 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
       return HttpDownloader::FILE_ERROR;
     }
     sink.downloaded += read;
-    if (sink.progress && sink.total > 0) sink.progress(sink.downloaded, sink.total);
+    sink.poll(true);
   }
 
   const bool complete = esp_http_client_is_complete_data_received(client);

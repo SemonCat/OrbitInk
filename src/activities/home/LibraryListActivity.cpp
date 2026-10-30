@@ -29,7 +29,9 @@ const std::vector<LibraryGrouping::Entry>& LibraryListActivity::currentEntries()
   return topLevelEntries;
 }
 
-void LibraryListActivity::loadBooks() { topLevelEntries = LibraryGrouping::loadLibraryEntries(SETTINGS.groupBySeries); }
+void LibraryListActivity::loadBooks() {
+  topLevelEntries = LibraryGrouping::loadLibraryEntries(SETTINGS.groupBySeries, /*preferIndexWhenFlat=*/true);
+}
 
 void LibraryListActivity::ensurePageLoaded(const int itemsPerPage) {
   auto& entries = currentEntries();

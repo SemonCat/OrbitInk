@@ -43,6 +43,8 @@ class CssParser {
   // v10 invalidates v9 caches because older callers could save a successful-looking cache after
   // a stylesheet was skipped or only partly parsed. The record layout remains unchanged.
   static constexpr uint8_t CSS_CACHE_VERSION = 10;
+  // Same record layout; explicitly records deterministic resource-limit degradation.
+  static constexpr uint8_t CSS_LIMITED_CACHE_VERSION = 11;
 
   // Outcome of growing one of the internal storage pools.
   enum class PoolResult : uint8_t { Ready, Limit, OutOfMemory };
@@ -53,7 +55,7 @@ class CssParser {
   // Outcome of a full stylesheet parse. Partial means some rules were dropped (limit hit,
   // allocation failure, or the parser buffers truncated malformed/oversized input) -- callers
   // must not treat Partial as equivalent to a clean parse when deciding whether to trust a cache.
-  enum class ParseResult : uint8_t { Complete, Partial, Error };
+  enum class ParseResult : uint8_t { Complete, Partial, Error, Limited };
 
   // Outcome of loading rules from the on-disk cache into memory.
   enum class CacheLoadResult : uint8_t { Complete, LowMemory, Invalid };
@@ -78,6 +80,7 @@ class CssParser {
    *   the stream is invalid or a read fails, including after one or more complete rules.
    */
   ParseResult loadFromStream(HalFile& source);
+  void markLimited() { limited_ = true; }
 
   /**
    * Look up the style for an HTML element, considering tag name and class attributes.
@@ -195,6 +198,7 @@ class CssParser {
   // limit, or allocation failure makes the accumulated rule set ineligible for persistence even
   // if a later stylesheet parses successfully. clear() begins a fresh accumulation.
   bool cacheable_ = true;
+  bool limited_ = false;
 
   std::string cachePath;
 

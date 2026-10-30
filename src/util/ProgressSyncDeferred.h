@@ -1,10 +1,13 @@
 #pragma once
 
 #include <string>
+#include <memory>
+#include <optional>
 
 #include "DeferredProgress.h"
 
 class GfxRenderer;
+class Epub;
 
 namespace ProgressSyncDeferred {
 
@@ -15,6 +18,9 @@ bool stage(const DeferredProgress& candidate);
 // Return the durable remote candidate for this book, if any. Callers feed its origin timestamp
 // and position identity into ProgressPullPolicy; percentage is never used as freshness.
 bool pendingForBook(const std::string& path, DeferredProgress& out);
+
+// Validate the durable handoff and choose the chapter for budgeted reader pagination.
+std::optional<int> readerSpine(const std::shared_ptr<Epub>& epub);
 
 // Map and atomically save the staged remote with initialized fonts/layout. Returns true only when
 // progress.bin changed. Invalid provider/book/hash identity is discarded; transient local layout

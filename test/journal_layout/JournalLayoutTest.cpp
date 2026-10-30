@@ -306,4 +306,19 @@ TEST(JournalTitleWrap, DegenerateInputsReturnNothing) {
   EXPECT_TRUE(journal::wrapTitle(kCjkTitle, 200, 0, fakeWidth).empty());
 }
 
+TEST(JournalTitleWrap, LongTitlesUseLogarithmicMeasurements) {
+  size_t calls = 0;
+  size_t measuredBytes = 0;
+  const auto measure = [&](const std::string& text) {
+    ++calls;
+    measuredBytes += text.size();
+    return fakeWidth(text);
+  };
+  const auto lines = journal::wrapTitle(std::string(4096, 'x'), 200, 3, measure);
+  ASSERT_EQ(lines.size(), 3u);
+  EXPECT_LE(calls, 45u);
+  EXPECT_LT(measuredBytes, 100000u);
+  for (const auto& line : lines) EXPECT_LE(fakeWidth(line), 200);
+}
+
 }  // namespace

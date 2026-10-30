@@ -1098,6 +1098,45 @@ int SdCardFont::prewarmStyle(uint8_t styleIdx, const uint32_t* codepoints, uint3
     return fallbackToRequested(missed);
   }
 
+  // Preserve a small resident page while rebuilding the in-place mini arena. This is optional:
+  // under pressure (or for a large page) the original SD reload path remains the fallback.
+  struct ResidentGlyph {
+    uint32_t codepoint;
+    EpdGlyph glyph;
+  };
+  std::unique_ptr<ResidentGlyph[]> resident;
+  std::unique_ptr<uint8_t[]> residentBitmap;
+  uint32_t residentCount = 0;
+  const size_t residentBytes = s.miniGlyphCount * sizeof(ResidentGlyph) + s.miniBitmapUsed;
+  if (!metadataOnly && !s.miniMetadataOnly && s.miniGlyphCount > 0 && s.miniBitmapUsed > 0 &&
+      s.miniBitmapUsed <= 8192 && residentBytes <= 16384 &&
+      ESP.getFreeHeap() > residentBytes + MINI_UNION_HEADROOM_BYTES + MINI_UNION_MAX_ARENA_BYTES &&
+      ESP.getMaxAllocHeap() > residentBytes + MINI_UNION_HEADROOM_BYTES) {
+    resident.reset(new (std::nothrow) ResidentGlyph[s.miniGlyphCount]);
+    residentBitmap.reset(new (std::nothrow) uint8_t[s.miniBitmapUsed]);
+    if (resident && residentBitmap) {
+      memcpy(residentBitmap.get(), s.miniBitmap, s.miniBitmapUsed);
+      for (uint32_t iv = 0; iv < s.miniIntervalCount; ++iv) {
+        const auto& interval = s.miniIntervals[iv];
+        for (uint32_t cp = interval.first; cp <= interval.last; ++cp) {
+          resident[residentCount++] = {cp, s.miniGlyphs[interval.offset + cp - interval.first]};
+        }
+      }
+    } else {
+      resident.reset();
+      residentBitmap.reset();
+    }
+  }
+  const auto residentFor = [&](uint32_t cp) -> const EpdGlyph* {
+    uint32_t lo = 0, hi = residentCount;
+    while (lo < hi) {
+      const uint32_t mid = lo + (hi - lo) / 2;
+      if (resident[mid].codepoint < cp) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo < residentCount && resident[lo].codepoint == cp ? &resident[lo].glyph : nullptr;
+  };
+
   // Build mini intervals from sorted codepoints. Reset counts and fall back to the
   // stub until the rebuild completes, but KEEP the existing buffers (keep-if-fits
   // reuse) — the free-and-realloc-per-page pattern here was a primary fragmenter.
@@ -1177,6 +1216,11 @@ int SdCardFont::prewarmStyle(uint8_t styleIdx, const uint32_t* codepoints, uint3
     }
     uint32_t mapIdx = readOrder[i];
     int32_t gIdx = mappings[mapIdx].globalIndex;
+    if (const auto* cached = residentFor(mappings[mapIdx].codepoint)) {
+      s.miniGlyphs[mapIdx] = *cached;
+      lastReadIndex = INT32_MIN;
+      continue;
+    }
 
     uint32_t fileOff = s.glyphsFileOffset + static_cast<uint32_t>(gIdx) * sizeof(EpdGlyph);
     if (gIdx != lastReadIndex + 1) {
@@ -1262,6 +1306,13 @@ int SdCardFont::prewarmStyle(uint8_t styleIdx, const uint32_t* codepoints, uint3
 
       if (glyph.dataLength == 0) {
         glyph.dataOffset = miniBitmapOffset;
+        continue;
+      }
+      if (const auto* cached = residentFor(mappings[mapIdx].codepoint)) {
+        memcpy(s.miniBitmap + miniBitmapOffset, residentBitmap.get() + cached->dataOffset, glyph.dataLength);
+        glyph.dataOffset = miniBitmapOffset;
+        miniBitmapOffset += glyph.dataLength;
+        lastBitmapEnd = UINT32_MAX;
         continue;
       }
 
@@ -1416,11 +1467,9 @@ bool SdCardFont::advanceTableLookup(uint8_t styleIdx, uint32_t codepoint, uint16
 void SdCardFont::mergeIntoAdvanceTable(uint8_t styleIdx, const AdvanceEntry* sortedNew, uint32_t newCount) {
   if (newCount == 0) return;
   const uint32_t oldSize = advanceTableSize_[styleIdx];
-  if (oldSize >= ADVANCE_CACHE_LIMIT) return;  // already full
-
-  // Cap the merged size at ADVANCE_CACHE_LIMIT. Anything past the cap is
-  // dropped from the tail of the sorted merge — a deterministic, bounded loss
-  // that doesn't bias which codepoints get cached on subsequent passes.
+  // Make room for the current request even after earlier chapters filled the cache.
+  newCount = std::min(newCount, ADVANCE_CACHE_LIMIT);
+  const uint32_t keepOld = std::min(oldSize, ADVANCE_CACHE_LIMIT - newCount);
   uint32_t mergedCap = oldSize + newCount;
   if (mergedCap > ADVANCE_CACHE_LIMIT) mergedCap = ADVANCE_CACHE_LIMIT;
 
@@ -1433,8 +1482,8 @@ void SdCardFont::mergeIntoAdvanceTable(uint8_t styleIdx, const AdvanceEntry* sor
   const AdvanceEntry* a = advanceTable_[styleIdx];
   const AdvanceEntry* b = sortedNew;
   uint32_t i = 0, j = 0, k = 0;
-  while (k < mergedCap && (i < oldSize || j < newCount)) {
-    if (i < oldSize && (j >= newCount || a[i].codepoint <= b[j].codepoint)) {
+  while (k < mergedCap && (i < keepOld || j < newCount)) {
+    if (i < keepOld && (j >= newCount || a[i].codepoint <= b[j].codepoint)) {
       merged[k++] = a[i++];
     } else {
       merged[k++] = b[j++];
@@ -1474,6 +1523,35 @@ uint16_t SdCardFont::getAdvance(uint32_t codepoint, uint8_t style) const {
   return 0;
 }
 
+uint16_t SdCardFont::measureAdvance(uint32_t codepoint, uint8_t style) const {
+  style &= (MAX_STYLES - 1);
+  uint16_t advance = 0;
+  if (advanceTableLookup(style, codepoint, &advance)) return advance;
+  if (!loaded_ || !styles_[style].present || utf8IsCombiningMark(codepoint)) return 0;
+  const auto& s = styles_[style];
+  for (uint32_t i = 0; i < s.miniIntervalCount; ++i) {
+    const auto& interval = s.miniIntervals[i];
+    if (codepoint < interval.first) break;
+    if (codepoint <= interval.last) {
+      return s.miniGlyphs[interval.offset + codepoint - interval.first].advanceX;
+    }
+  }
+  for (uint32_t i = 0; i < overflowCount_; ++i) {
+    if (overflow_[i].styleIdx == style && overflow_[i].codepoint == codepoint) return overflow_[i].glyph.advanceX;
+  }
+  int32_t index = findGlobalGlyphIndex(s, codepoint);
+  if (index < 0) index = findGlobalGlyphIndex(s, REPLACEMENT_GLYPH);
+  if (index < 0) return 0;
+  HalFile file;
+  EpdGlyph glyph{};
+  if (!Storage.openFileForRead("SDCF", filePath_, file) ||
+      !file.seekSet(s.glyphsFileOffset + static_cast<uint32_t>(index) * sizeof(EpdGlyph)) ||
+      file.read(&glyph, sizeof(glyph)) != sizeof(glyph)) {
+    return 0;
+  }
+  return glyph.advanceX;
+}
+
 // Given a sorted array of unique codepoints, resolve glyph indices per style,
 // batch-read advanceX from SD, and merge into the persistent advance table.
 // Caller owns the codepoints buffer.
@@ -1482,11 +1560,6 @@ int SdCardFont::fetchAdvancesForCodepoints(uint32_t* codepoints, uint32_t cpCoun
   for (uint8_t si = 0; si < MAX_STYLES; si++) {
     if (!(styleMask & (1 << si)) || !styles_[si].present) continue;
     const auto& s = styles_[si];
-
-    // Stop fetching once the cache is full — further inserts would be dropped
-    // by the merge anyway. The renderer fast path tolerates missing entries
-    // (returns 0); the slow path is still correct for those codepoints.
-    if (advanceTableSize_[si] >= ADVANCE_CACHE_LIMIT) continue;
 
     // For each codepoint in `codepoints`, skip those already cached, then
     // resolve to a glyph index. Build a parallel array sorted by glyph index
@@ -1590,7 +1663,12 @@ int SdCardFont::buildAdvanceTableRange(Iter begin, Iter end, bool includeSpace, 
 
   // +2 reserved slots for space and hyphen injected after the main scan.
   static constexpr uint32_t MAX_UNIQUE_CODEPOINTS = 4096;
-  uint32_t* codepoints = new (std::nothrow) uint32_t[MAX_UNIQUE_CODEPOINTS + 2];
+  size_t maxCodepoints = extraText ? strlen(extraText) : 0;
+  for (auto it = begin; it != end && maxCodepoints < MAX_UNIQUE_CODEPOINTS; ++it) {
+    maxCodepoints += strlen(asCStr(*it));
+  }
+  const auto capacity = static_cast<uint32_t>(std::min<size_t>(maxCodepoints, MAX_UNIQUE_CODEPOINTS));
+  uint32_t* codepoints = new (std::nothrow) uint32_t[capacity + 2];
   if (!codepoints) {
     LOG_ERR("SDCF", "buildAdvanceTable: failed to allocate codepoint buffer (%u bytes)", MAX_UNIQUE_CODEPOINTS * 4);
     return -1;
@@ -1599,10 +1677,10 @@ int SdCardFont::buildAdvanceTableRange(Iter begin, Iter end, bool includeSpace, 
   bool hitCap = false;
 
   for (auto it = begin; it != end && !hitCap; ++it) {
-    hitCap = collectUniqueCodepoints(asCStr(*it), codepoints, cpCount, MAX_UNIQUE_CODEPOINTS);
+    hitCap = collectUniqueCodepoints(asCStr(*it), codepoints, cpCount, capacity);
   }
   if (extraText && !hitCap) {
-    hitCap = collectUniqueCodepoints(extraText, codepoints, cpCount, MAX_UNIQUE_CODEPOINTS);
+    hitCap = collectUniqueCodepoints(extraText, codepoints, cpCount, capacity);
   }
 
   if (includeSpace && std::none_of(codepoints, codepoints + cpCount, [](uint32_t c) { return c == ' '; }))

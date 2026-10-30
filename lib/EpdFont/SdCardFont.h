@@ -62,6 +62,8 @@ class SdCardFont {
   // Look up advanceX for a codepoint from the advance table.
   // Returns the 12.4 fixed-point advance, or 0 if not found.
   uint16_t getAdvance(uint32_t codepoint, uint8_t style) const;
+  // Measurement fallback reads the glyph record only, never its bitmap.
+  uint16_t measureAdvance(uint32_t codepoint, uint8_t style) const;
 
   // Returns true if advance table is populated for at least one style.
   bool hasAdvanceTable() const;
@@ -301,7 +303,7 @@ class SdCardFont {
   uint32_t advanceTableSize_[MAX_STYLES] = {};
   bool advanceTableLookup(uint8_t styleIdx, uint32_t codepoint, uint16_t* outAdvance) const;
   // Merge sortedNew (sorted by codepoint, no overlap with existing) into the
-  // advance table for styleIdx, preserving sort order; cap-truncates the tail.
+  // advance table for styleIdx, preserving sort order and preferring new entries.
   void mergeIntoAdvanceTable(uint8_t styleIdx, const AdvanceEntry* sortedNew, uint32_t newCount);
 
   Stats stats_;

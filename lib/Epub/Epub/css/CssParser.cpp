@@ -664,6 +664,7 @@ void CssParser::processRuleBlockWithStyle(std::string_view selectorGroup, const 
       [&](std::string_view sel) {
         if (sel.size() > MAX_SELECTOR_LENGTH) {
           LOG_DBG("CSS", "Selector too long (%zu > %zu), skipping", sel.size(), MAX_SELECTOR_LENGTH);
+          limited_ = true;
           return;
         }
 
@@ -693,9 +694,11 @@ void CssParser::processRuleBlockWithStyle(std::string_view selectorGroup, const 
         if (result == RuleInsertResult::Limit) {
           LOG_ERR("CSS", "CSS rule store limit reached at %u rules", entryCount_);
           ruleGrowthStopped_ = true;
+          limited_ = true;
         } else if (result == RuleInsertResult::OutOfMemory) {
           LOG_ERR("CSS", "OOM while growing CSS rule store at %u rules", entryCount_);
           ruleGrowthStopped_ = true;
+          cacheable_ = false;
         }
       });
 }
@@ -856,10 +859,10 @@ CssParser::ParseResult CssParser::loadFromStream(HalFile& source) {
     handleChar('/');
   }
 
-  if (inputTruncated) LOG_ERR("CSS", "CSS input exceeded parser buffer; cache will not be saved");
+  if (inputTruncated) LOG_ERR("CSS", "CSS input exceeded parser buffer; using bounded styles");
   const bool incompleteInput = bodyDepth > 0 || inAtRule || inComment || !selector.empty();
-  const bool partial = ruleGrowthStopped_ || inputTruncated || incompleteInput;
-  if (readFailed || partial) cacheable_ = false;
+  if (inputTruncated || incompleteInput) limited_ = true;
+  if (readFailed) cacheable_ = false;
   LOG_DBG("CSS",
           "Parsed %zu rules from %zu bytes; styles %u/%u (%zu/%zu bytes), selectors %u/%u bytes, index %u/%u "
           "(%zu/%zu bytes)",
@@ -872,7 +875,8 @@ CssParser::ParseResult CssParser::loadFromStream(HalFile& source) {
     LOG_ERR("CSS", "CSS source read failed after %zu bytes; cache will not be saved", totalRead);
     return ParseResult::Error;
   }
-  return partial ? ParseResult::Partial : ParseResult::Complete;
+  if (!cacheable_) return ParseResult::Partial;
+  return limited_ ? ParseResult::Limited : ParseResult::Complete;
 }
 
 // Style resolution
@@ -936,7 +940,7 @@ bool CssParser::saveToCache() const {
   const auto writeBytes = [&file, &writeOk](const void* data, const size_t size) {
     if (writeOk && size > 0 && file.write(data, size) != size) writeOk = false;
   };
-  const uint8_t version = CSS_CACHE_VERSION;
+  const uint8_t version = limited_ ? CSS_LIMITED_CACHE_VERSION : CSS_CACHE_VERSION;
   writeBytes(&version, sizeof(version));
   const uint16_t ruleCount = entryCount_;
   writeBytes(&ruleCount, sizeof(ruleCount));
@@ -991,7 +995,8 @@ CssParser::CacheStatus CssParser::validateCache() {
   // Same version handling as loadFromCache(), including removing a stale-version file so the
   // next open rebuilds rather than re-reading it.
   uint8_t version = 0;
-  if (file.read(&version, 1) != 1 || version != CssParser::CSS_CACHE_VERSION) {
+  if (file.read(&version, 1) != 1 ||
+      (version != CSS_CACHE_VERSION && version != CSS_LIMITED_CACHE_VERSION)) {
     LOG_DBG("CSS", "Cache version mismatch (got %u, expected %u), removing stale cache for rebuild", version,
             CssParser::CSS_CACHE_VERSION);
     // Explicitly close() file before calling Storage.remove()
@@ -1041,7 +1046,8 @@ CssParser::CacheLoadResult CssParser::loadFromCache() {
 
   // Read and verify version
   uint8_t version = 0;
-  if (file.read(&version, 1) != 1 || version != CssParser::CSS_CACHE_VERSION) {
+  if (file.read(&version, 1) != 1 ||
+      (version != CSS_CACHE_VERSION && version != CSS_LIMITED_CACHE_VERSION)) {
     LOG_DBG("CSS", "Cache version mismatch (got %u, expected %u), removing stale cache for rebuild", version,
             CssParser::CSS_CACHE_VERSION);
     // Explicitly close() file before calling Storage.remove()
@@ -1129,6 +1135,7 @@ CssParser::CacheLoadResult CssParser::loadFromCache() {
           static_cast<size_t>(styleCapacity_) * csscache::RULE_STYLE_BYTES, selectorPoolSize_, selectorPoolCapacity_,
           entryCount_, entryCapacity_, static_cast<size_t>(entryCount_) * sizeof(SelectorEntry),
           static_cast<size_t>(entryCapacity_) * sizeof(SelectorEntry));
+  limited_ = version == CSS_LIMITED_CACHE_VERSION;
   return CacheLoadResult::Complete;
 }
 
@@ -1141,4 +1148,5 @@ void CssParser::clear() {
   styleCount_ = styleCapacity_ = 0;
   ruleGrowthStopped_ = false;
   cacheable_ = true;
+  limited_ = false;
 }

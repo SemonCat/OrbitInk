@@ -3,6 +3,7 @@
 #include <FsHelpers.h>
 #include <FontCacheManager.h>
 #include <GfxRenderer.h>
+#include <Epub/Section.h>
 #include <HalStorage.h>
 #include <Logging.h>
 
@@ -16,6 +17,7 @@
 #include "KOReaderCredentialStore.h"
 #include "KOReaderDocumentId.h"
 #include "ProgressMapper.h"
+#include "ProgressSyncNetwork.h"
 #include "activities/reader/EpubReaderUtils.h"
 #include "components/UITheme.h"
 
@@ -24,6 +26,13 @@ namespace {
 constexpr char SLEEP_FRAME_FILE[] = "/.crosspoint/sleep_frame.bin";
 
 std::optional<ReaderRenderSpec> mappingRenderSpec(GfxRenderer& renderer) {
+  const auto previousOrientation = renderer.getOrientation();
+  switch (SETTINGS.orientation) {
+    case CrossPointSettings::PORTRAIT: renderer.setOrientation(GfxRenderer::Portrait); break;
+    case CrossPointSettings::LANDSCAPE_CW: renderer.setOrientation(GfxRenderer::LandscapeClockwise); break;
+    case CrossPointSettings::INVERTED: renderer.setOrientation(GfxRenderer::PortraitInverted); break;
+    case CrossPointSettings::LANDSCAPE_CCW: renderer.setOrientation(GfxRenderer::LandscapeCounterClockwise); break;
+  }
   int top;
   int right;
   int bottom;
@@ -36,6 +45,7 @@ std::optional<ReaderRenderSpec> mappingRenderSpec(GfxRenderer& renderer) {
 
   const int viewportWidth = renderer.getScreenWidth() - left - right;
   const int viewportHeight = renderer.getScreenHeight() - top - bottom;
+  renderer.setOrientation(previousOrientation);
   if (viewportWidth <= 0 || viewportHeight <= 0 || viewportWidth > UINT16_MAX || viewportHeight > UINT16_MAX) {
     LOG_ERR("SyncDef", "Invalid viewport for deferred progress mapping: %dx%d", viewportWidth, viewportHeight);
     return std::nullopt;
@@ -82,7 +92,7 @@ std::string expectedDocument(const DeferredProgress& deferred) {
     return KOReaderDocumentId::calculateForProgress(
         deferred.path, KOREADER_STORE.getMatchMethod() == DocumentMatchMethod::FILENAME);
   }
-  if (deferred.provider == 2) return KOReaderDocumentId::calculateForStats(deferred.path);
+  if (deferred.provider == 2) return ProgressSyncNetwork::binaryDocument(deferred.path);
   return {};
 }
 }  // namespace
@@ -120,6 +130,29 @@ bool pendingForBook(const std::string& path, DeferredProgress& out) {
   return true;
 }
 
+std::optional<int> readerSpine(const std::shared_ptr<Epub>& epub) {
+  const auto& deferred = APP_STATE.deferredProgress;
+  if (!deferred.forBook(epub->getPath())) return std::nullopt;
+  if (expectedDocument(deferred) != deferred.document) {
+    persistClear();
+    return std::nullopt;
+  }
+  int spine = 0, page = 0, pages = 0;
+  uint64_t timestamp = 0;
+  bool legacy = false;
+  if (EpubReaderUtils::loadProgress(epub->getCachePath(), spine, page, pages, timestamp, legacy)) {
+    if (timestamp > deferred.timestamp) {
+      persistClear();
+      return std::nullopt;
+    }
+    if (timestamp == 0 && !legacy) return std::nullopt;
+  }
+  if (deferred.hasRichPosition && deferred.richSpineIndex < epub->getSpineItemsCount()) {
+    return deferred.richSpineIndex;
+  }
+  return ProgressMapper::targetSpine(epub, {deferred.xpath, deferred.percentage});
+}
+
 bool applyForBook(const std::string& path, GfxRenderer& renderer) {
   const DeferredProgress deferred = APP_STATE.deferredProgress;
   if (!deferred.forBook(path) || !FsHelpers::hasEpubExtension(path)) return false;
@@ -138,7 +171,7 @@ bool applyForBook(const std::string& path, GfxRenderer& renderer) {
 
   auto epub = std::make_shared<Epub>(path, "/.crosspoint");
   epub->setupCacheDir();
-  if (!epub->load(/*buildIfMissing=*/true, /*skipLoadingCss=*/true)) {
+  if (!epub->load(/*buildIfMissing=*/true, /*skipLoadingCss=*/SETTINGS.embeddedStyle == 0)) {
     LOG_ERR("SyncDef", "Could not load EPUB to apply deferred progress");
     return false;
   }
@@ -155,7 +188,7 @@ bool applyForBook(const std::string& path, GfxRenderer& renderer) {
   bool hasLocal = EpubReaderUtils::loadProgress(epub->getCachePath(), localSpine, localPage, localPages,
                                                 localTimestamp, localLegacy);
   hasLocal = hasLocal && localSpine >= 0 && localSpine < epub->getSpineItemsCount() && localPage >= 0 &&
-             localPages > 0 && localPage < localPages;
+             ((localPages > 0 && localPage < localPages) || (localPages == 0 && localPage == 0));
   if (hasLocal && localTimestamp == 0 && !localLegacy) {
     LOG_INF("SyncDef", "Holding deferred progress because chronology is ambiguous");
     return false;
@@ -167,7 +200,23 @@ bool applyForBook(const std::string& path, GfxRenderer& renderer) {
 
   std::optional<CrossPointPosition> mapped;
   const std::optional<ReaderRenderSpec> renderSpec = mappingRenderSpec(renderer);
-  if (deferred.provider == 1 && deferred.hasRichPosition) {
+  const SavedProgressPosition saved{deferred.xpath, deferred.percentage};
+  const int target = deferred.hasRichPosition && deferred.richSpineIndex < epub->getSpineItemsCount()
+                         ? deferred.richSpineIndex
+                         : ProgressMapper::targetSpine(epub, saved);
+  const bool chapterStart = !deferred.xpath.empty() && ProgressMapper::isChapterStart(epub, saved) &&
+                            (!deferred.hasRichPosition || deferred.richPageNumber == 0) &&
+                            target == ProgressMapper::targetSpine(epub, saved);
+  // An interior anchor requires a verified complete denominator. The reader owns missing
+  // pagination and drives it through its budgeted loop; retain the raw handoff meanwhile.
+  if (!chapterStart) {
+    Section section(epub, target, renderer);
+    if (!renderSpec || !section.loadSectionFile(*renderSpec) || section.isPartial()) return false;
+  }
+  if (chapterStart) {
+    mapped = ProgressMapper::toCrossPoint(epub, saved, renderer, -1, 0, 0,
+                                          renderSpec ? &*renderSpec : nullptr);
+  } else if (deferred.provider == 1 && deferred.hasRichPosition) {
     KOReaderRichPosition rich;
     rich.pctQ = deferred.richPctQ;
     rich.spineIndex = deferred.richSpineIndex;
@@ -183,7 +232,8 @@ bool applyForBook(const std::string& path, GfxRenderer& renderer) {
                                           /*fallbackTotalPages=*/0, renderSpec ? &*renderSpec : nullptr);
   }
   if (!mapped.has_value() || mapped->spineIndex < 0 || mapped->spineIndex >= epub->getSpineItemsCount() ||
-      mapped->totalPages <= 0 || mapped->pageNumber < 0 || mapped->pageNumber >= mapped->totalPages) {
+      (!chapterStart && mapped->totalPages <= 0) || mapped->pageNumber < 0 ||
+      (mapped->totalPages > 0 && mapped->pageNumber >= mapped->totalPages)) {
     LOG_ERR("SyncDef", "Deferred remote position could not be mapped safely");
     return false;
   }

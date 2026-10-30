@@ -699,7 +699,7 @@ class ParagraphStreamer final : public Print {
 
 bool streamSpine(const std::shared_ptr<Epub>& epub, int spineIndex, ParagraphStreamer& s) {
   const auto href = epub->getSpineItem(spineIndex).href;
-  return !href.empty() && epub->readItemContentsToStream(href, s, 1024);
+  return !href.empty() && epub->readSpineContentsToStream(spineIndex, s, 1024);
 }
 }  // namespace
 
@@ -777,6 +777,22 @@ std::optional<CrossPointPosition> ProgressMapper::fromRichPosition(const std::sh
   return result;
 }
 
+int ProgressMapper::targetSpine(const std::shared_ptr<Epub>& epub, const SavedProgressPosition& position) {
+  const int fragment = parseIndex(position.xpath, "/body/DocFragment[");
+  const int count = epub->getSpineItemsCount();
+  if (fragment > 0 && fragment <= count) return fragment - 1;
+  const size_t bytes = static_cast<size_t>(epub->getBookSize() * std::max(0.0f, std::min(1.0f, position.percentage)));
+  for (int i = 0; i < count; ++i) {
+    if (epub->getCumulativeSpineItemSize(i) >= bytes) return i;
+  }
+  return std::max(0, count - 1);
+}
+
+bool ProgressMapper::isChapterStart(const std::shared_ptr<Epub>& epub, const SavedProgressPosition& position) {
+  const int fragment = parseIndex(position.xpath, "/body/DocFragment[");
+  return fragment > 0 && fragment <= epub->getSpineItemsCount() && isChapterStartXPath(position.xpath);
+}
+
 CrossPointPosition ProgressMapper::toCrossPoint(const std::shared_ptr<Epub>& epub, const SavedProgressPosition& koPos,
                                                 GfxRenderer& renderer, int currentSpineIndex,
                                                 int totalPagesInCurrentSpine, int fallbackTotalPages,
@@ -836,27 +852,22 @@ CrossPointPosition ProgressMapper::toCrossPoint(const std::shared_ptr<Epub>& epu
     bool compatibleLayoutReady = false;
     if (renderSpec && renderSpec->viewportWidth > 0 && renderSpec->viewportHeight > 0) {
       compatibleLayoutReady = tempSection.loadSectionFile(*renderSpec) && !tempSection.isPartial();
-      if (!compatibleLayoutReady) {
-        // The deferred-sync caller releases TLS and glyph transients first. Lending the fixed
-        // framebuffer gives the ordinary bounded-memory Section builder its normal scratch space;
-        // completing the target chapter here guarantees the saved page denominator survives the
-        // reader's compatible-cache load instead of being discarded with a partial estimate.
-        GfxRenderer::FrameBufferLoan loan(renderer);
-        // Deferred progress initially loads only book.bin to keep the pre-network phase lean.
-        // Re-enter the normal EPUB load path here so a missing/stale CSS cache is rebuilt before
-        // this function writes a section cache that claims compatibility with the active spec.
-        compatibleLayoutReady = epub->load(/*buildIfMissing=*/true, /*skipLoadingCss=*/false) &&
-                                tempSection.createSectionFile(*renderSpec);
-      }
       if (compatibleLayoutReady) result.totalPages = tempSection.pageCount;
     }
     if (result.totalPages <= 0) {
-      if (auto cachedCount = tempSection.getCachedPageCount()) {
+      if (auto cachedCount = renderSpec ? std::optional<uint16_t>{} : tempSection.getCachedPageCount()) {
         result.totalPages = *cachedCount;
       } else if (fallbackTotalPages > 0) {
         result.totalPages = fallbackTotalPages;
       }
     }
+  }
+
+  // A chapter start is independent of pagination and needs no XHTML pass. Zero denotes
+  // an unknown denominator; callers must not persist an invented one-page chapter.
+  if (xpathSpineTrusted && isChapterStartXPath(koPos.xpath)) {
+    result.pageNumber = 0;
+    return result;
   }
 
   float intra = 0.0f;
@@ -895,11 +906,6 @@ CrossPointPosition ProgressMapper::toCrossPoint(const std::shared_ptr<Epub>& epu
       LOG_DBG("PM", "XPath p[%d]/text()[%d]+%d -> %.1f%% (target=%zu total=%zu)", xpathP, xpathTextNode, xpathChar,
               intra * 100, s.getTargetVisChars(), s.getTotalVisChars());
     }
-  }
-  if (!resolvedIntra && xpathSpineTrusted && isChapterStartXPath(koPos.xpath)) {
-    intra = 0.0f;
-    resolvedIntra = true;
-    LOG_DBG("PM", "Chapter-start XPath %s -> spine=%d page start", koPos.xpath.c_str(), result.spineIndex);
   }
   if (!resolvedIntra) {
     const size_t bytesIn = (targetBytes > prevCum) ? (targetBytes - prevCum) : 0;

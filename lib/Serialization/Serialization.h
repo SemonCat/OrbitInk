@@ -43,11 +43,21 @@ inline void readString(std::istream& is, std::string& s) {
   is.read(&s[0], len);
 }
 
-inline void readString(HalFile& file, std::string& s) {
-  uint32_t len;
-  readPod(file, len);
+inline bool readString(HalFile& file, std::string& s) {
+  uint32_t len = 0;
+  // Cache strings are bounded metadata/paths. Reject corrupt lengths before allocating.
+  constexpr uint32_t MAX_STRING_BYTES = 16 * 1024;
+  if (file.read(&len, sizeof(len)) != sizeof(len) || len > MAX_STRING_BYTES ||
+      file.available() < 0 || len > static_cast<uint32_t>(file.available())) {
+    s.clear();
+    return false;
+  }
   s.resize(len);
-  file.read(&s[0], len);
+  if (len && file.read(s.data(), len) != static_cast<int>(len)) {
+    s.clear();
+    return false;
+  }
+  return true;
 }
 
 // Shared 4-byte magic this fork stamps at the start of its own on-disk binary cache formats

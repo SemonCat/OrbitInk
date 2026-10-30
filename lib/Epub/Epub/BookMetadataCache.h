@@ -4,8 +4,10 @@
 #include <HalStorage.h>
 
 #include <algorithm>
+#include <array>
 #include <deque>
 #include <memory>
+#include <mutex>
 #include <string>
 
 class BookMetadataCache {
@@ -55,6 +57,19 @@ class BookMetadataCache {
   bool buildMode;
 
   HalFile bookFile;
+  std::mutex readMutex;
+  struct CachedSpine {
+    int index = -1;
+    SpineEntry entry;
+  };
+  struct CachedToc {
+    int index = -1;
+    TocEntry entry;
+  };
+  std::array<CachedSpine, 4> cachedSpines;
+  std::array<CachedToc, 2> cachedToc;
+  size_t nextSpine = 0;
+  size_t nextToc = 0;
   // Temp file handles during build
   HalFile spineFile;
   HalFile tocFile;
@@ -122,6 +137,7 @@ class BookMetadataCache {
   void setMetadataOnly(const BookMetadata& metadata);
   SpineEntry getSpineEntry(int index);
   TocEntry getTocEntry(int index);
+  int resolveSpineHref(const std::string& target);
   int getSpineCount() const { return spineCount; }
   int getTocCount() const { return tocCount; }
   bool isLoaded() const { return loaded; }

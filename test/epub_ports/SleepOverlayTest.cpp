@@ -128,6 +128,41 @@ TEST(SleepOverlay, DirectWriterOpaqueWhiteAndAllX3Orientations) {
     EXPECT_EQ(r.framebuffer[position], mask);
   }
 }
+TEST(ImageBands, SkippedRowsAndColumnsProduceSamePixelsInEveryOrientation) {
+  for (auto orientation : {GfxRenderer::Portrait, GfxRenderer::PortraitInverted, GfxRenderer::LandscapeClockwise,
+                           GfxRenderer::LandscapeCounterClockwise}) {
+    for (int bandTop : {0, 77, 263, 490}) {
+      GfxRenderer renderer;
+      renderer.orientation = orientation;
+      DirectPixelWriter writer;
+      writer.init(renderer);
+      writer.originY = bandTop;
+      writer.clipRows = std::min(32, 528 - bandTop);
+      renderer.clearScreen();
+      constexpr int x = 5, y = 13, width = 320, height = 480;
+      for (int row = 0; row < height; ++row) {
+        writer.beginRow(y + row);
+        for (int col = 0; col < width; ++col) writer.writePixel(x + col, (row + col) % 4, true);
+      }
+      const auto reference = renderer.framebuffer;
+      renderer.clearScreen();
+      int first, end;
+      writer.bandRowRange(y, height, first, end);
+      if (orientation == GfxRenderer::LandscapeClockwise || orientation == GfxRenderer::LandscapeCounterClockwise) {
+        EXPECT_LE(end - first, writer.clipRows);
+      } else {
+        EXPECT_EQ(end - first, height);
+      }
+      for (int row = first; row < end; ++row) {
+        writer.beginRow(y + row);
+        int firstCol, endCol;
+        writer.bandColRange(x, width, firstCol, endCol);
+        for (int col = firstCol; col < endCol; ++col) writer.writePixel(x + col, (row + col) % 4, true);
+      }
+      EXPECT_EQ(renderer.framebuffer, reference);
+    }
+  }
+}
 TEST(SleepOverlay, PngHeaderRejectsUnsupportedDepthAndDimensions) {
   std::vector<uint8_t> png = {137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 'I', 'H', 'D',
                               'R', 0,  0,  0,  2,  0,  0,  0,  1, 8, 6, 0,  0,   0};

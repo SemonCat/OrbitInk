@@ -58,6 +58,7 @@ void BookOrbitHomeActivity::onEnter() {
   bookOrbitConfigured = !BookOrbitStats::currentOwner().isZero();
   journal = SETTINGS.uiTheme == CrossPointSettings::UI_THEME::JOURNAL;
   for (bool& tried : journalCoverTried) tried = false;
+  for (auto& cached : journalText) cached = {};
 
   shown.clear();
   shown.reserve(MAX_RECENT);
@@ -406,6 +407,31 @@ void BookOrbitHomeActivity::renderJournal() {
                                        tr(STR_SEARCH), tr(STR_SETTINGS_TITLE)};
   const int rows = std::max(0, bookSlots() - 1);
 
+  const auto hints =
+      mappedInput.mapLabels(shown.empty() ? "" : tr(STR_RESUME), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+  std::vector<GfxRenderer::TextPrewarmRun> runs{
+      {MASTHEAD_FONT_ID, masthead}, {SMALL_FONT_ID, tagline1}, {SMALL_FONT_ID, tagline2},
+      {SMALL_FONT_ID, "0123456789/: %\xe2\x80\xa6"},
+      {SMALL_FONT_ID, tr(STR_BO_MY_LIBRARY)}, {SMALL_FONT_ID, tr(STR_BO_DOWNLOADED)},
+      {UI_10_FONT_ID, nowLabel, EpdFontFamily::BOLD}, {UI_10_FONT_ID, recentLabel, EpdFontFamily::BOLD},
+      {UI_10_FONT_ID, tr(STR_NO_RECENT_BOOKS)}, {UI_12_FONT_ID, tr(STR_BO_PICK_A_BOOK), EpdFontFamily::BOLD},
+      {SMALL_FONT_ID, hints.btn1}, {SMALL_FONT_ID, hints.btn2},
+      {SMALL_FONT_ID, hints.btn3}, {SMALL_FONT_ID, hints.btn4},
+      {SETTINGS.getReaderFontId(), "\xe2\x80\xa6"},
+      {UI_12_FONT_ID, "\xe2\x80\xa6", EpdFontFamily::BOLD}};
+  for (const auto* label : navLabels) {
+    runs.push_back({UI_10_FONT_ID, label});
+    runs.push_back({UI_10_FONT_ID, label, EpdFontFamily::BOLD});
+  }
+  for (int i = 0; i < bookSlots(); ++i) {
+    const auto& book = shown[i].book;
+    runs.push_back({i == 0 ? SETTINGS.getReaderFontId() : UI_10_FONT_ID, book.title.c_str()});
+    runs.push_back({i == 0 ? UI_12_FONT_ID : UI_10_FONT_ID, book.title.c_str(), EpdFontFamily::BOLD});
+    runs.push_back({i == 0 ? UI_10_FONT_ID : SMALL_FONT_ID, book.author.c_str()});
+  }
+  runs.push_back({UI_10_FONT_ID, "0123456789%\xe2\x80\xa6", EpdFontFamily::BOLD});
+  renderer.prewarmTextRuns(runs);
+
   // Measure every role from the strings it will actually draw (CJK fallback lines are taller).
   journal::Metrics jm;
   jm.screenWidth = renderer.getScreenWidth();
@@ -533,14 +559,22 @@ void BookOrbitHomeActivity::renderJournal() {
       const auto measure = [&](const std::string& str) {
         return renderer.getTextWidth(heroFont, str.c_str(), heroStyle);
       };
-      const auto lines = journal::wrapTitle(s.book.title, t.width, L.heroTitleLines, measure);
-      for (const auto& line : lines) {
+      auto& cached = journalText[0];
+      if (cached.width != t.width || cached.maxLines != L.heroTitleLines ||
+          cached.font != heroFont || cached.style != heroStyle) {
+        cached.width = t.width;
+        cached.maxLines = L.heroTitleLines;
+        cached.font = heroFont;
+        cached.style = heroStyle;
+        cached.lines = journal::wrapTitle(s.book.title, t.width, L.heroTitleLines, measure);
+        cached.author = renderer.truncatedText(UI_10_FONT_ID, s.book.author.c_str(), t.width);
+      }
+      for (const auto& line : cached.lines) {
         renderer.drawText(heroFont, t.x, ty, line.c_str(), true, heroStyle);
         ty += jm.titleLine;
       }
       if (!s.book.author.empty()) {
-        const auto author = renderer.truncatedText(UI_10_FONT_ID, s.book.author.c_str(), t.width);
-        renderer.drawText(UI_10_FONT_ID, t.x, ty, author.c_str());
+        renderer.drawText(UI_10_FONT_ID, t.x, ty, cached.author.c_str());
         ty += jm.bodyLine;
       }
       hairline(renderer, t.x, ty + L.heroSeparatorGap, t.width * 2 / 3);
@@ -584,14 +618,19 @@ void BookOrbitHomeActivity::renderJournal() {
       const auto measure = [&](const std::string& str) {
         return renderer.getTextWidth(UI_10_FONT_ID, str.c_str(), EpdFontFamily::BOLD);
       };
-      const auto lines = journal::wrapTitle(s.book.title, tw, L.recentTitleLines, measure);
-      for (const auto& line : lines) {
+      auto& cached = journalText[i + 1];
+      if (cached.width != tw || cached.maxLines != L.recentTitleLines) {
+        cached.width = tw;
+        cached.maxLines = L.recentTitleLines;
+        cached.lines = journal::wrapTitle(s.book.title, tw, L.recentTitleLines, measure);
+        cached.author = renderer.truncatedText(SMALL_FONT_ID, s.book.author.c_str(), tw);
+      }
+      for (const auto& line : cached.lines) {
         renderer.drawText(UI_10_FONT_ID, tx, ty, line.c_str(), true, EpdFontFamily::BOLD);
         ty += jm.bodyLine;
       }
       if (!s.book.author.empty() && L.recentAuthorDy >= 0) {
-        const auto author = renderer.truncatedText(SMALL_FONT_ID, s.book.author.c_str(), tw);
-        renderer.drawText(SMALL_FONT_ID, tx, std::min(ty, col.y + L.recentAuthorDy), author.c_str());
+        renderer.drawText(SMALL_FONT_ID, tx, std::min(ty, col.y + L.recentAuthorDy), cached.author.c_str());
       }
       char meta[32];
       char pct[8];
@@ -626,8 +665,6 @@ void BookOrbitHomeActivity::renderJournal() {
     }
   }
 
-  const auto hints =
-      mappedInput.mapLabels(shown.empty() ? "" : tr(STR_RESUME), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, hints.btn1, hints.btn2, hints.btn3, hints.btn4);
 
   if (!firstRenderDone) {

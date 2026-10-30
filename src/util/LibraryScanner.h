@@ -14,6 +14,10 @@ namespace LibraryScanner {
 // LibraryListActivity's Titles list, LibraryIndexBuilder's delta rebuild) -- keeping it one symbol
 // means they can never disagree about how much of a very large card they each cover.
 constexpr size_t MAX_LIBRARY_BOOKS = 2000;
+constexpr size_t DIRECTORY_BYTE_BUDGET = 16 * 1024;
+constexpr size_t RESULT_BYTE_BUDGET = 96 * 1024;
+constexpr size_t MAX_PENDING_DIRS = 128;
+constexpr size_t MAX_SCAN_PATH_BYTES = 1024;
 
 struct Entry {
   std::string path;
@@ -28,6 +32,14 @@ struct Entry {
   uint32_t fatDateTime = 0;
 };
 
+struct ScanStats {
+  size_t directoryEntries = 0;
+  size_t directoryBytes = 0;
+  size_t pendingDirectories = 0;
+  size_t pendingBytes = 0;
+  size_t resultBytes = 0;
+  bool capped = false;
+};
 // Recursively walks `root` for every book file (epub/xtc/txt/md — bmp is a viewer,
 // not a book, so it is excluded, matching NextBookFinder), applying the same
 // hidden-file/System-Volume-Information rules as FileBrowserActivity::loadFiles.
@@ -43,7 +55,8 @@ struct Entry {
 // already open during the walk (no extra SD open) -- used by the library index's delta rebuild
 // to detect changed files without reopening every path in a second pass. Callers that only need
 // paths (the Covers grid, the Titles list) leave this false.
-std::vector<Entry> scanAllBooks(const std::string& root, size_t maxBooks, bool collectFingerprint = false);
+std::vector<Entry> scanAllBooks(const std::string& root, size_t maxBooks, bool collectFingerprint = false,
+                              ScanStats* stats = nullptr);
 
 // Basename (path component after the last '/') of a full path -- exposed so LibraryGrouping can
 // sort/group LibraryIndex::Entry (a different type, but the same "has a .path" shape) by the same

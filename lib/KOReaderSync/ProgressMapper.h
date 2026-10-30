@@ -45,6 +45,9 @@ struct SavedProgressPosition {
  */
 class ProgressMapper {
  public:
+  // Select the chapter without streaming XHTML or building pagination.
+  static int targetSpine(const std::shared_ptr<Epub>& epub, const SavedProgressPosition& position);
+  static bool isChapterStart(const std::shared_ptr<Epub>& epub, const SavedProgressPosition& position);
   /**
    * Convert CrossPoint position to SavedProgress format.
    *
@@ -66,8 +69,8 @@ class ProgressMapper {
    * @param currentSpineIndex Index of the currently open spine item (for density estimation)
    * @param totalPagesInCurrentSpine Total pages in the current spine item (for density estimation)
    * @param fallbackTotalPages Last-resort page count when no compatible cache is available
-   * @param renderSpec Optional active reader layout. When supplied, a missing target-section cache
-   *        is finalized before the mapped page is returned.
+   * @param renderSpec Optional active reader layout used to validate existing pagination.
+   *        This function never builds a missing section.
    * @return CrossPoint position
    */
   static CrossPointPosition toCrossPoint(const std::shared_ptr<Epub>& epub, const SavedProgressPosition& savedPos,

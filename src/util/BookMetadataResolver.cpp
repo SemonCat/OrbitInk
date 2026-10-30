@@ -36,7 +36,6 @@ Result resolve(const std::string& path, const int coverWidth, const int coverHei
     if (!haveMetadata) {
       // Never opened before: no book.bin yet. A full build (spine + TOC) would be too expensive to
       // pay per book just to resolve a title/author, so fall back to a lightweight OPF-only parse.
-      epub.setupCacheDir();
       haveMetadata = epub.loadMetadataOnly();
     }
     const uint32_t metaMs = millis() - metaStartMs;
@@ -50,6 +49,7 @@ Result resolve(const std::string& path, const int coverWidth, const int coverHei
         const std::string thumbPath = epub.getThumbBmpPath(coverWidth, coverHeight);
         thumbCached = Storage.exists(thumbPath.c_str());
         if (!thumbCached) {
+          epub.setupCacheDir();
           epub.generateThumbBmp(coverWidth, coverHeight);
           result.coverGenerated = true;
         }

@@ -42,6 +42,7 @@
 #include "util/BookOrbitMigration.h"
 #include "util/ButtonNavigator.h"
 #include "util/KOReaderAutoSync.h"
+#include "util/ProgressSyncNetwork.h"
 #include "util/ProgressSyncDeferred.h"
 #include "util/ProgressSyncRetry.h"
 #include "util/ScreenshotUtil.h"
@@ -266,17 +267,12 @@ void enterDeepSleep(bool fromTimeout = false) {
   activityManager.goToSleep(fromTimeout);
   if (needsOverlayBase && !isQuickResumeSleep) Storage.remove(SLEEP_FRAME_FILE);
 
-  // Silent, best-effort KOSync push: the sleep screen is already fully painted above, so nothing
-  // visible changes regardless of how long this takes. No-ops immediately (no radio) unless
-  // lastSleepFromReader is true and a saved WiFi network exists; bounded and abortable by a button
-  // press either way, and manages its own WiFi lifecycle -- see KOReaderAutoSync::pushOnSleep().
-  KOReaderAutoSync::syncOnSleep(renderer);
-  // Independent BookOrbit progress push, on its OWN WiFi connect/disconnect cycle -- a wholly
-  // separate provider with its own credentials, so this cannot assume the KOSync call above ran
-  // or left a connection open. No-ops immediately unless BookOrbitCredentialStore has credentials
-  // configured. See src/util/BookOrbitAutoSync.h's class comment for the double-WiFi-connect
-  // tradeoff this accepts when both providers are configured.
-  BookOrbitAutoSync::syncOnSleep(renderer);
+  // Each provider keeps its own outcome and TLS session within one radio interval.
+  {
+    ProgressSyncNetwork::Batch syncBatch(APP_STATE.openEpubPath, &renderer);
+    KOReaderAutoSync::syncOnSleep(renderer);
+    BookOrbitAutoSync::syncOnSleep(renderer);
+  }
 
   // Tear down WiFi so the modem power domain isn't held alive across deep sleep. Wake from deep
   // sleep is effectively a chip reset, so no state needs to survive. Usually a no-op by this point
@@ -346,6 +342,7 @@ static void synchronizeProgressHeadlessly() {
       // gate scheduling or require a valid wall clock.
       halClock.begin();
       const std::string path = APP_STATE.openEpubPath;
+      ProgressSyncNetwork::Batch syncBatch(path);
       KOReaderAutoSync::syncHeadlessly(path);
       BookOrbitAutoSync::syncHeadlessly(path);
       nextSyncDelayMicros = ProgressSyncRetry::sleepDelayMicros();

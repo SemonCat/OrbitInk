@@ -1,6 +1,9 @@
 #include "LibraryGrouping.h"
 
 #include <FsHelpers.h>
+#include <Epub.h>
+#include <Xtc.h>
+#include <HalStorage.h>
 
 #include <algorithm>
 #include <cctype>
@@ -31,14 +34,14 @@ bool seriesIndexLess(const float a, const float b) {
 // title/author come along for free since the index already resolved them. Used by
 // loadLibraryEntries()'s preferIndexWhenFlat path to avoid a second LibraryScanner walk when the
 // caller already knows the index is current.
-std::vector<LibraryGrouping::Entry> flatten(const std::vector<LibraryIndex::Entry>& indexEntries) {
+std::vector<LibraryGrouping::Entry> flatten(std::vector<LibraryIndex::Entry>& indexEntries) {
   std::vector<LibraryGrouping::Entry> result;
   result.reserve(indexEntries.size());
-  for (const auto& ie : indexEntries) {
+  for (auto& ie : indexEntries) {
     LibraryGrouping::Entry e;
-    e.path = ie.path;
-    e.title = ie.title;
-    e.author = ie.author;
+    e.path = std::move(ie.path);
+    e.title = std::move(ie.title);
+    e.author = std::move(ie.author);
     result.push_back(std::move(e));
   }
   LibraryScanner::sortByFilename(result);
@@ -160,12 +163,12 @@ std::vector<Entry> loadLibraryEntries(const bool groupBySeries, const bool prefe
     // to the ungrouped scan below rather than showing an empty screen.
   }
 
-  const auto scanned = LibraryScanner::scanAllBooks("/", LibraryScanner::MAX_LIBRARY_BOOKS);
+  auto scanned = LibraryScanner::scanAllBooks("/", LibraryScanner::MAX_LIBRARY_BOOKS);
   std::vector<Entry> entries;
   entries.reserve(scanned.size());
-  std::transform(scanned.begin(), scanned.end(), std::back_inserter(entries), [](const LibraryScanner::Entry& s) {
+  std::transform(scanned.begin(), scanned.end(), std::back_inserter(entries), [](LibraryScanner::Entry& s) {
     Entry e;
-    e.path = s.path;
+    e.path = std::move(s.path);
     return e;
   });
   LibraryScanner::sortByFilename(entries);
@@ -185,6 +188,19 @@ bool resolvePage(std::vector<Entry>& entries, const int pageStart, const int pag
     }
 
     const std::string& resolvePath = (e.isSeries && !e.members.empty()) ? e.members.front().path : e.path;
+    if (!needText && needCover) {
+      std::string thumbnail;
+      if (FsHelpers::hasEpubExtension(resolvePath)) {
+        thumbnail = Epub(resolvePath, "/.crosspoint").getThumbBmpPath(coverWidth, coverHeight);
+      } else if (FsHelpers::hasXtcExtension(resolvePath)) {
+        thumbnail = Xtc(resolvePath, "/.crosspoint").getThumbBmpPath(coverWidth, coverHeight);
+      }
+      if (!thumbnail.empty() && Storage.exists(thumbnail.c_str())) {
+        e.coverThumbPath = std::move(thumbnail);
+        e.hasCover = true;
+        continue;
+      }
+    }
     const BookMetadataResolver::Result result = BookMetadataResolver::resolve(resolvePath, coverWidth, coverHeight);
     if (needText) {
       e.title = result.title;

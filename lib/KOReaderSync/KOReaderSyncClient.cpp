@@ -118,6 +118,10 @@ KOReaderSyncClient::Session::~Session() {
   if (transport_) transport_->end();
 }
 
+void KOReaderSyncClient::Session::end() {
+  if (transport_) transport_->end();
+}
+
 KOReaderSyncClient::Error KOReaderSyncClient::Session::authenticate() {
   lastHttpCode_ = 0;
   if (!KOREADER_STORE.hasCredentials()) {

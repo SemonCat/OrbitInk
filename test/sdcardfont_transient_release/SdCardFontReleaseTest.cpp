@@ -649,3 +649,53 @@ TEST(SleepOverlayPngMemory, ReleaseDecisionChecksTotalAndContiguousHeap) {
   EXPECT_TRUE(pngMemory::hasDecoderHeadroom(61440, decoderBytes, decoderBytes));
   EXPECT_TRUE(pngMemory::hasDecoderHeadroom(80000, 70000, decoderBytes));
 }
+
+TEST(SdCardFontMeasurement, SaturationStillCachesLaterCjkParagraphs) {
+  HalStorage::resetTestFiles();
+  ESP.freeHeap = ESP.maxAllocHeap = 0xFFFFFFFFu;
+  std::vector<uint32_t> cps;
+  std::string first;
+  std::string later;
+  for (uint32_t cp = 0x4E00; cp < 0x4E00 + 1200; ++cp) {
+    cps.push_back(cp);
+    utf8AppendCodepoint(cp, cp < 0x4E00 + 800 ? first : later);
+  }
+  HalStorage::registerTestFile(TEST_PATH, buildCpfont(cps));
+  SdCardFont font;
+  ASSERT_TRUE(font.load(TEST_PATH));
+  ASSERT_EQ(font.buildAdvanceTable(first.c_str(), 1), 0);
+  ASSERT_EQ(font.buildAdvanceTable(later.c_str(), 1), 0);
+  HalStorage::resetReadCount();
+  for (uint32_t cp = 0x4E00 + 800; cp < 0x4E00 + 1200; ++cp) EXPECT_EQ(font.measureAdvance(cp, 0), 16);
+  EXPECT_EQ(HalStorage::readCount(), 0u);
+  EXPECT_EQ(font.getStats().overflowLoads, 0u);
+  // An evicted early character needs one metadata record, never a bitmap/overflow arena.
+  EXPECT_EQ(font.measureAdvance(0x4E00 + 700, 0), 16);
+  EXPECT_LE(HalStorage::readCount(), 1u);
+  EXPECT_EQ(font.getStats().overflowLoads, 0u);
+}
+
+TEST(SdCardFontMeasurement, ColdMetricFallbackReadsNoBitmapAndRetainsNoMiniArena) {
+  HalStorage::resetTestFiles();
+  HalStorage::registerTestFile(TEST_PATH, buildMinimalTwoGlyphCpfont());
+  SdCardFont font;
+  ASSERT_TRUE(font.load(TEST_PATH));
+  HalStorage::resetReadCount();
+  EXPECT_EQ(font.measureAdvance('A', 0), 16);
+  EXPECT_EQ(HalStorage::readCount(), 1u);
+  EXPECT_FALSE(miniDataResident(font, 0));
+  EXPECT_EQ(font.getStats().overflowLoads, 0u);
+}
+
+TEST_F(SdCardFontReleaseTest, ExtendingSmallResidentPageReadsOnlyNewGlyphs) {
+  HalStorage::registerTestFile(TEST_PATH, buildCpfont({'A', 'B', 'C'}));
+  ASSERT_TRUE(font_.load(TEST_PATH));
+  ASSERT_EQ(font_.prewarm("AB", 1, false), 0);
+  HalStorage::resetReadCount();
+  ASSERT_EQ(font_.prewarm("ABC", 1, false), 0);
+  EXPECT_EQ(HalStorage::readCount(), 2u);  // C's metadata and bitmap only
+  EXPECT_TRUE(miniDataResident(font_, 0));
+  EXPECT_EQ(font_.getEpdFont(0)->getGlyph('A')->advanceX, 16);
+  font_.releaseTransientRenderCache();
+  EXPECT_FALSE(miniDataResident(font_, 0));
+}

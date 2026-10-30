@@ -26,20 +26,15 @@
 #include "ProgressMapper.h"
 #include "ProgressSyncDeferred.h"
 #include "ProgressSyncRetry.h"
+#include "ProgressSyncPosition.h"
+#include "ProgressSyncNetwork.h"
 #include "WifiCredentialStore.h"
 #include "activities/reader/EpubReaderUtils.h"
-
-// Deliberately independent of KOReaderAutoSync.cpp rather than sharing its WiFi/session
-// plumbing -- see BookOrbitAutoSync.h's class comment for why. The connect helper, abort
-// callback, and EPUB-load helper below are intentionally near-duplicates of KOReaderAutoSync.cpp's
-// own private ones: sharing them would mean exposing them from KOReaderAutoSync's private
-// anonymous namespace, coupling two providers this phase exists to keep separable.
 
 namespace BookOrbitAutoSync {
 
 namespace {
 
-constexpr unsigned long WIFI_CONNECT_TIMEOUT_MS = 3500;
 
 bool userRequestedAbort() {
   gpio.update();
@@ -47,37 +42,8 @@ bool userRequestedAbort() {
 }
 
 bool connectToSavedWifi() {
-  if (WIFI_STORE.getCredentialCount() == 0) return false;
+  if (!ProgressSyncNetwork::connect()) return false;
 
-  std::optional<WifiCredential> cred;
-  const std::string lastSsid = WIFI_STORE.getLastConnectedSsid();
-  if (!lastSsid.empty()) {
-    cred = WIFI_STORE.findCredential(lastSsid);
-  }
-  if (!cred) {
-    cred = WIFI_STORE.getCredentialAt(0);
-  }
-  if (!cred) return false;
-
-  WiFi.mode(WIFI_STA);
-  if (cred->password.empty()) {
-    WiFi.begin(cred->ssid.c_str());
-  } else {
-    WiFi.begin(cred->ssid.c_str(), cred->password.c_str());
-  }
-
-  const unsigned long deadline = millis() + WIFI_CONNECT_TIMEOUT_MS;
-  while (WiFi.status() != WL_CONNECTED) {
-    if (millis() >= deadline || userRequestedAbort()) {
-      LOG_DBG("BOAuto", "WiFi connect timed out or aborted");
-      return false;
-    }
-    delay(50);
-  }
-  // Unlike WifiSelectionActivity, this saved-network path never initialized a
-  // lost/unset RTC. Pulls still worked, but every subsequent reading event was
-  // stamped unknown and both automatic and manual pushes stayed blocked.
-  // Recover the clock before returning to the reader; never restamp saved events.
   uint64_t now = 0;
   if (halClock.isAvailable() && !halClock.getEpochSeconds(now)) {
     LOG_INF("BOAuto", "RTC unavailable; recovering time for subsequent reading events");
@@ -86,10 +52,7 @@ bool connectToSavedWifi() {
   return true;
 }
 
-void disconnectWifi() {
-  WiFi.disconnect(true);
-  WiFi.mode(WIFI_OFF);
-}
+void disconnectWifi() { ProgressSyncNetwork::disconnect(); }
 
 bool loadEpubForSync(Epub& epub, bool buildIfMissing) {
   if (buildIfMissing) epub.setupCacheDir();
@@ -102,7 +65,7 @@ bool loadEpubForSync(Epub& epub, bool buildIfMissing) {
 // This is an inference from that design, not independently verified against a live server's own
 // /syncs/progress route (only its page-stats route has been) -- see
 // BookOrbitSyncClient::Session::getProgress's own doc comment for the same caveat.
-std::string computeDocumentHash(const std::string& path) { return KOReaderDocumentId::calculateForStats(path); }
+std::string computeDocumentHash(const std::string& path) { return ProgressSyncNetwork::binaryDocument(path); }
 
 bool resetMarkerMatches(const std::string& path, const std::string& document) {
   return APP_STATE.bookOrbitResetPath == path && APP_STATE.bookOrbitResetDocument == document &&
@@ -205,7 +168,7 @@ constexpr uint32_t STATS_PHASE_BUDGET_MS = 15000;
 // OTHER_STATS_BOOKS_PER_WINDOW other owner-matching queued books, fairly rotated) runs once under
 // one deadline and stops at the first failure that would only repeat -- see drainWindow().
 void drainStats(BookOrbitSyncClient::Session& session, const std::string& epubPath, const AfterProgress after) {
-  const std::string statsHash = KOReaderDocumentId::calculateForStats(epubPath);
+  const std::string statsHash = ProgressSyncNetwork::binaryDocument(epubPath);
   if (BookOrbitStats::drainPossible() && !statsHash.empty()) {
     BookOrbitStats::WindowLimits limits;
     limits.budgetMs = STATS_PHASE_BUDGET_MS;
@@ -272,7 +235,7 @@ ProgressSyncRetry::Outcome synchronizeProgress(const std::string& epubPath, GfxR
   SavedProgressPosition saved;
   if (hasLocal) {
     localPercentage = epub->calculateProgress(spineIndex, static_cast<float>(pageNumber) / pageCount);
-    saved = ProgressMapper::toSavedProgress(epub, CrossPointPosition{spineIndex, pageNumber, pageCount});
+    saved = ProgressSyncPosition::resolve(epub, CrossPointPosition{spineIndex, pageNumber, pageCount}, hash, renderer);
     if (!std::isfinite(localPercentage) || localPercentage < 0.0f || localPercentage > 1.0f || saved.xpath.empty()) {
       LOG_ERR("BOAuto", "Sync: invalid local progress; treating it as absent");
       hasLocal = false;
@@ -443,7 +406,7 @@ SyncNowResult syncNow(const std::string& epubPath, GfxRenderer& renderer, std::s
 
   // Consume any earlier headless handoff before calculating the local side. There is no provider
   // session yet, so Section/layout work cannot overlap retained TLS buffers.
-  ProgressSyncDeferred::applyForBook(epubPath, renderer);
+  if (!ProgressSyncNetwork::active()) ProgressSyncDeferred::applyForBook(epubPath, renderer);
   if (auto* fcm = renderer.getFontCacheManager()) fcm->forceReleaseTransientCaches();
 
   // Prepare and release the local EPUB before connecting. This makes manual sync use the same
@@ -467,7 +430,7 @@ SyncNowResult syncNow(const std::string& epubPath, GfxRenderer& renderer, std::s
   SavedProgressPosition saved;
   if (hasLocal) {
     localPercentage = epub->calculateProgress(spineIndex, static_cast<float>(pageNumber) / pageCount);
-    saved = ProgressMapper::toSavedProgress(epub, CrossPointPosition{spineIndex, pageNumber, pageCount});
+    saved = ProgressSyncPosition::resolve(epub, CrossPointPosition{spineIndex, pageNumber, pageCount}, hash, &renderer);
     if (!std::isfinite(localPercentage) || localPercentage < 0.0f || localPercentage > 1.0f || saved.xpath.empty()) {
       hasLocal = false;
       localPercentage = 0.0f;
@@ -604,7 +567,8 @@ SyncNowResult syncNow(const std::string& epubPath, GfxRenderer& renderer, std::s
 
   // The scoped Session (including its SecureHttpClient transport) is destroyed before mapping.
   if (applyDeferred && !ProgressSyncDeferred::applyForBook(epubPath, renderer)) {
-    return SyncNowResult::LOCAL_LOAD_FAILED;
+    DeferredProgress pending;
+    if (!ProgressSyncDeferred::pendingForBook(epubPath, pending)) return SyncNowResult::LOCAL_LOAD_FAILED;
   }
   if (applyDeferred) result = SyncNowResult::PULLED;
   KOReaderAutoSync::recordProviderSuccess(true);
@@ -622,7 +586,7 @@ void syncOnSleep(GfxRenderer& renderer) {
     KOReaderAutoSync::recordProviderSuccess(false);
   }
   // synchronizeProgress's Session and TLS transport have been destroyed before layout work.
-  ProgressSyncDeferred::applyForBook(path, renderer);
+  if (!ProgressSyncNetwork::active()) ProgressSyncDeferred::applyForBook(path, renderer);
 }
 
 void syncHeadlessly(const std::string& epubPath) {
@@ -638,7 +602,7 @@ void syncOnClose(GfxRenderer& renderer) {
       ProgressSyncRetry::Outcome::Confirmed) {
     KOReaderAutoSync::recordProviderSuccess(true);
   }
-  ProgressSyncDeferred::applyForBook(path, renderer);
+  if (!ProgressSyncNetwork::active()) ProgressSyncDeferred::applyForBook(path, renderer);
 }
 
 void syncOnOpen(const std::string& epubPath, GfxRenderer& renderer) {
@@ -646,7 +610,7 @@ void syncOnOpen(const std::string& epubPath, GfxRenderer& renderer) {
       ProgressSyncRetry::Outcome::Confirmed) {
     KOReaderAutoSync::recordProviderSuccess(true);
   }
-  ProgressSyncDeferred::applyForBook(epubPath, renderer);
+  if (!ProgressSyncNetwork::active()) ProgressSyncDeferred::applyForBook(epubPath, renderer);
 }
 
 }  // namespace BookOrbitAutoSync

@@ -1939,7 +1939,7 @@ int GfxRenderer::getSpaceWidth(const int fontId, const EpdFontFamily::Style styl
   auto sdIt = sdCardFonts_.find(fontId);
   if (sdIt != sdCardFonts_.end() && sdIt->second->hasAdvanceTable()) {
     const uint8_t resolvedStyle = resolveSdCardStyle(*sdIt->second, style);
-    return fp4::toPixel(sdIt->second->getAdvance(' ', resolvedStyle));
+    return fp4::toPixel(sdIt->second->measureAdvance(' ', resolvedStyle));
   }
 
   const auto fontIt = fontMap.find(fontId);
@@ -1960,7 +1960,7 @@ int GfxRenderer::getSpaceAdvance(const int fontId, const uint32_t leftCp, const 
   auto sdIt = sdCardFonts_.find(fontId);
   if (sdIt != sdCardFonts_.end() && sdIt->second->hasAdvanceTable()) {
     const uint8_t resolvedStyle = resolveSdCardStyle(*sdIt->second, style);
-    return fp4::toPixel(sdIt->second->getAdvance(' ', resolvedStyle));
+    return fp4::toPixel(sdIt->second->measureAdvance(' ', resolvedStyle));
   }
 
   const auto fontIt = fontMap.find(fontId);
@@ -2008,17 +2008,12 @@ int GfxRenderer::getTextAdvanceX(const int fontId, const char* text, EpdFontFami
       LOG_ERR("GFX", "Font %d not found", resolvedFontId);
       return 0;
     }
-    const auto& font = fontIt->second;
     while (uint32_t cp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&text))) {
       // RTL vowel marks (niqqud/harakat) are zero-advance overlays in drawText — no width.
       if (BidiUtils::isTransparentMark(cp)) {
         continue;
       }
-      int32_t advFP = sdIt->second->getAdvance(cp, styleIdx);
-      if (advFP == 0 && !utf8IsCombiningMark(cp)) {
-        const EpdGlyph* glyph = font.getGlyph(cp, style);
-        advFP = glyph ? glyph->advanceX : 0;
-      }
+      const int32_t advFP = sdIt->second->measureAdvance(cp, styleIdx);
       widthFP += isSupSub ? (advFP + 1) / 2 : advFP;
     }
     return fp4::toPixel(widthFP);
@@ -2052,8 +2047,12 @@ int GfxRenderer::getTextAdvanceX(const int fontId, const char* text, EpdFontFami
       widthPx += fp4::toPixel(prevAdvanceFP + kernFP);         // snap 12.4 fixed-point to nearest pixel
     }
 
-    const EpdGlyph* glyph = font.getGlyph(cp, style);
-    prevAdvanceFP = glyph ? glyph->advanceX : 0;
+    if (sdIt != sdCardFonts_.end()) {
+      prevAdvanceFP = sdIt->second->measureAdvance(cp, resolveSdCardStyle(*sdIt->second, style));
+    } else {
+      const EpdGlyph* glyph = font.getGlyph(cp, style);
+      prevAdvanceFP = glyph ? glyph->advanceX : 0;
+    }
     if ((style & (EpdFontFamily::SUP | EpdFontFamily::SUB)) != 0) {
       prevAdvanceFP = (prevAdvanceFP + 1) / 2;
     }
@@ -2080,11 +2079,7 @@ int32_t advanceTableAdvanceFp(void* ctx, const uint32_t cp) {
   if (BidiUtils::isTransparentMark(cp)) {
     return 0;
   }
-  int32_t advFP = c->sdFont->getAdvance(cp, c->styleIdx);
-  if (advFP == 0 && !utf8IsCombiningMark(cp)) {
-    const EpdGlyph* glyph = c->font->getGlyph(cp, c->style);
-    advFP = glyph ? glyph->advanceX : 0;
-  }
+  const int32_t advFP = c->sdFont->measureAdvance(cp, c->styleIdx);
   // Never negative: both sources (SdCardFont::getAdvance and EpdGlyph::advanceX) are unsigned
   // 12.4 fixed-point, which is what makes prefix width monotonic and this single scan valid.
   return c->isSupSub ? (advFP + 1) / 2 : advFP;

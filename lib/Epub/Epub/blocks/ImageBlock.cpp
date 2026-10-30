@@ -173,7 +173,9 @@ void renderRowsFromPxcSlot(GfxRenderer& renderer, int x, int y) {
   DirectPixelWriter pw;
   pw.init(renderer);
 
-  for (int row = 0; row < pxcSlotHeight; row++) {
+  int firstRow, endRow;
+  pw.bandRowRange(y, pxcSlotHeight, firstRow, endRow);
+  for (int row = firstRow; row < endRow; row++) {
     const uint8_t* rowBuffer = pxcRowPtr((size_t)row * bytesPerRow, bytesPerRow, tempRow);
     pw.beginRow(y + row);
     int colStart, colEnd;
@@ -231,7 +233,12 @@ bool renderFromCache(GfxRenderer& renderer, const std::string& cachePath, int x,
 
   // Streaming fallback (slot didn't fit). A failed slot load may have consumed
   // part of the payload; rewind to just past the header.
-  cacheFile.seek(4);
+  DirectPixelWriter pw;
+  pw.init(renderer);
+  int firstRow, endRow;
+  pw.bandRowRange(y, cachedHeight, firstRow, endRow);
+  if (!cacheFile.seek(4 + static_cast<size_t>(firstRow) * bytesPerRow)) return false;
+  if (firstRow == endRow) return true;
 
   // Read several rows per SD access. A one-row-per-read loop here means
   // cachedHeight (~728) tiny reads through the storage mutex + SdFat; batching
@@ -239,7 +246,7 @@ bool renderFromCache(GfxRenderer& renderer, const std::string& cachePath, int x,
   // whole image.
   int rowsPerRead = 4096 / bytesPerRow;
   if (rowsPerRead < 1) rowsPerRead = 1;
-  if (rowsPerRead > cachedHeight) rowsPerRead = cachedHeight;
+  if (rowsPerRead > endRow - firstRow) rowsPerRead = endRow - firstRow;
   uint8_t* readBuffer = (uint8_t*)malloc((size_t)rowsPerRead * bytesPerRow);
   if (!readBuffer) {
     // Fall back to a single-row buffer under memory pressure.
@@ -251,14 +258,11 @@ bool renderFromCache(GfxRenderer& renderer, const std::string& cachePath, int x,
     return false;
   }
 
-  DirectPixelWriter pw;
-  pw.init(renderer);
-
   int rowsInBuffer = 0;
   int bufferRow = 0;
-  for (int row = 0; row < cachedHeight; row++) {
+  for (int row = firstRow; row < endRow; row++) {
     if (bufferRow >= rowsInBuffer) {
-      const int toRead = (cachedHeight - row < rowsPerRead) ? (cachedHeight - row) : rowsPerRead;
+      const int toRead = (endRow - row < rowsPerRead) ? (endRow - row) : rowsPerRead;
       const size_t bytes = (size_t)toRead * bytesPerRow;
       if (cacheFile.read(readBuffer, bytes) != static_cast<int>(bytes)) {
         LOG_ERR("IMG", "Cache read error at row %d", row);

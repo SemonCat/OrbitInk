@@ -29,6 +29,7 @@
 #include "util/BookOrbitAutoSync.h"
 #include "util/FullScreenMessageActivity.h"
 #include "util/KOReaderAutoSync.h"
+#include "util/ProgressSyncNetwork.h"
 #include "util/ProgressSyncDeferred.h"
 
 static portMUX_TYPE activityManagerSpinlock = portMUX_INITIALIZER_UNLOCKED;
@@ -170,16 +171,15 @@ void ActivityManager::loop() {
         // a seemingly-frozen reader frame. Failures remain silent: the
         // destination activity simply replaces this overlay.
         GUI.drawPopup(renderer, tr(STR_SYNC_PROGRESS));
+        ProgressSyncNetwork::Batch syncBatch(APP_STATE.openEpubPath, &renderer);
         KOReaderAutoSync::syncOnClose(renderer);
-        // Independent BookOrbit progress push, on its own WiFi cycle -- see
-        // src/util/BookOrbitAutoSync.h's class comment. No-ops immediately unless
-        // BookOrbitCredentialStore has credentials configured.
         BookOrbitAutoSync::syncOnClose(renderer);
       }
       if (!pendingReaderSyncPath.empty()) {
         const std::string path = std::move(pendingReaderSyncPath);
         pendingReaderSyncPath.clear();
         ProgressSyncDeferred::applyForBook(path, renderer);
+        ProgressSyncNetwork::Batch syncBatch(path, &renderer);
         KOReaderAutoSync::syncOnOpen(path, renderer);
         BookOrbitAutoSync::syncOnOpen(path, renderer);
       }
@@ -293,18 +293,12 @@ void ActivityManager::goToReader(std::string path, const bool allowFastInitialRe
     appliedDeferred = ProgressSyncDeferred::applyForBook(path, renderer);
   }
   if (checkRemoteProgress && !replacingReader) {
-    // Silent, best-effort: no-ops immediately (no radio) unless a saved WiFi network and KOReader
-    // credentials both exist, and never blocks longer than its own short bound. Writes
-    // progress.bin directly if it finds a further remote position, so ReaderActivity/
-    // EpubReaderActivity below picks it up via their own existing load path -- no changes needed
-    // there. See KOReaderAutoSync::pullFurthestOnOpen().
+    if (ProgressSyncNetwork::available()) GUI.drawPopup(renderer, tr(STR_SYNC_PROGRESS));
+    ProgressSyncNetwork::Batch syncBatch(path, &renderer);
     KOReaderAutoSync::syncOnOpen(path, renderer);
-    // Independent BookOrbit pull, on its own WiFi cycle -- re-reads progress.bin fresh (it may
-    // have just been overwritten by the KOSync pull above) and only overwrites if BookOrbit's own
-    // remote is further, so this composes correctly regardless of call order. See
-    // lib/KOReaderSync/ProgressPullPolicy.h and src/util/BookOrbitAutoSync.h's class comment.
     BookOrbitAutoSync::syncOnOpen(path, renderer);
   }
+
   replaceActivity(std::make_unique<ReaderActivity>(renderer, mappedInput, std::move(path), allowFastInitialRefresh,
                                                    skipInitialRender && !appliedDeferred));
 }

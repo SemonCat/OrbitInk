@@ -63,6 +63,15 @@ class BookOrbitHomeActivity final : public Activity {
   };
   CoverBox journalCoverBox[MAX_RECENT];
   bool journalCoverTried[MAX_RECENT] = {};
+  struct JournalTextCache {
+    int width = -1;
+    int maxLines = 0;
+    int font = 0;
+    int style = 0;
+    std::vector<std::string> lines;
+    std::string author;
+  };
+  JournalTextCache journalText[MAX_RECENT];
 
   int bookSlots() const { return static_cast<int>(shown.size()); }
   int focusCount() const { return bookSlots() == 0 ? 1 + TILE_COUNT : bookSlots() + TILE_COUNT; }

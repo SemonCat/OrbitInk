@@ -23,21 +23,19 @@ void HalPowerManager::begin() {
 }
 
 void HalPowerManager::setPowerSaving(bool enabled) {
-  if (normalFreq <= 0) {
-    return;  // invalid state
+  if (normalFreq <= 0 || !modeMutex) return;
+  xSemaphoreTake(modeMutex, portMAX_DELAY);
+  updateFrequency(enabled);
+  xSemaphoreGive(modeMutex);
+}
+
+void HalPowerManager::updateFrequency(bool idle) {
+  bool protectedWork = false;
+  for (auto* lock = locks; lock; lock = lock->next) {
+    if (busyDepth == 0 || lock->owner != busyTask) protectedWork = true;
   }
-
-  auto wifiMode = WiFi.getMode();
-  if (wifiMode != WIFI_MODE_NULL) {
-    // Wifi is active, force disabling power saving
-    enabled = false;
-  }
-
-  // Note: We don't use mutex here to avoid too much overhead,
-  // it's not very important if we read a slightly stale value for currentLockMode
-  const LockMode mode = currentLockMode;
-
-  if (mode == None && enabled && !isLowPower) {
+  const bool enabled = (idle || busyDepth > 0) && !protectedWork && WiFi.getMode() == WIFI_MODE_NULL;
+  if (enabled && !isLowPower) {
     LOG_DBG("PWR", "Going to low-power mode");
     if (!setCpuFrequencyMhz(LOW_POWER_FREQ)) {
       LOG_DBG("PWR", "Failed to set CPU frequency = %d MHz", LOW_POWER_FREQ);
@@ -45,7 +43,7 @@ void HalPowerManager::setPowerSaving(bool enabled) {
     }
     isLowPower = true;
 
-  } else if ((!enabled || mode != None) && isLowPower) {
+  } else if (!enabled && isLowPower) {
     LOG_DBG("PWR", "Restoring normal CPU frequency");
     if (!setCpuFrequencyMhz(normalFreq)) {
       LOG_DBG("PWR", "Failed to set CPU frequency = %d MHz", normalFreq);
@@ -57,9 +55,23 @@ void HalPowerManager::setPowerSaving(bool enabled) {
   // Otherwise, no change needed
 }
 
-void HalPowerManager::beginDisplayBusyWait() { powerManager.setPowerSaving(true); }
+void HalPowerManager::beginDisplayBusyWait() {
+  auto& pm = powerManager;
+  if (!pm.modeMutex) return;
+  xSemaphoreTake(pm.modeMutex, portMAX_DELAY);
+  if (pm.busyDepth++ == 0) pm.busyTask = xTaskGetCurrentTaskHandle();
+  pm.updateFrequency(false);
+  xSemaphoreGive(pm.modeMutex);
+}
 
-void HalPowerManager::endDisplayBusyWait() { powerManager.setPowerSaving(false); }
+void HalPowerManager::endDisplayBusyWait() {
+  auto& pm = powerManager;
+  if (!pm.modeMutex) return;
+  xSemaphoreTake(pm.modeMutex, portMAX_DELAY);
+  if (pm.busyDepth > 0 && --pm.busyDepth == 0) pm.busyTask = nullptr;
+  pm.updateFrequency(false);
+  xSemaphoreGive(pm.modeMutex);
+}
 
 void HalPowerManager::startDeepSleep(HalGPIO& gpio, uint64_t retryDelayMicros) const {
 #ifdef ENABLE_SERIAL_LOG
@@ -130,26 +142,19 @@ uint16_t HalPowerManager::getBatteryPercentage() const {
 }
 
 HalPowerManager::Lock::Lock() {
+  owner = xTaskGetCurrentTaskHandle();
   xSemaphoreTake(powerManager.modeMutex, portMAX_DELAY);
-  // Current limitation: only one lock at a time
-  if (powerManager.currentLockMode != None) {
-    LOG_ERR("PWR", "Lock already held, ignore");
-    valid = false;
-  } else {
-    powerManager.currentLockMode = NormalSpeed;
-    valid = true;
-  }
+  next = powerManager.locks;
+  powerManager.locks = this;
+  powerManager.updateFrequency(false);
   xSemaphoreGive(powerManager.modeMutex);
-  if (valid) {
-    // Immediately restore normal CPU frequency if currently in low-power mode
-    powerManager.setPowerSaving(false);
-  }
 }
 
 HalPowerManager::Lock::~Lock() {
   xSemaphoreTake(powerManager.modeMutex, portMAX_DELAY);
-  if (valid) {
-    powerManager.currentLockMode = None;
-  }
+  auto** link = &powerManager.locks;
+  while (*link && *link != this) link = &(*link)->next;
+  if (*link) *link = next;
+  powerManager.updateFrequency(false);
   xSemaphoreGive(powerManager.modeMutex);
 }

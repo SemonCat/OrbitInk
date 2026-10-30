@@ -109,6 +109,7 @@ class BufferedFileReader {
 
   // Logical read position.
   size_t position() const { return bufStart + off; }
+  size_t available() const { return file.size() > position() ? file.size() - position() : 0; }
 
   bool seek(const size_t target) {
     // Within the buffered window: just move the cursor.
@@ -149,13 +150,18 @@ inline void writeString(BufferedFileWriter& out, const std::string& s) {
   out.write(s.data(), len);
 }
 
-inline void readString(BufferedFileReader& in, std::string& s) {
-  uint32_t len;
-  readPod(in, len);
-  s.resize(len);
-  if (len > 0) {
-    in.read(&s[0], len);
+inline bool readString(BufferedFileReader& in, std::string& s) {
+  uint32_t len = 0;
+  if (in.read(&len, sizeof(len)) != sizeof(len) || len > 16 * 1024 || len > in.available()) {
+    s.clear();
+    return false;
   }
+  s.resize(len);
+  if (len > 0 && in.read(&s[0], len) != len) {
+    s.clear();
+    return false;
+  }
+  return true;
 }
 
 }  // namespace serialization

@@ -20,9 +20,8 @@ void HalDisplay::begin(bool seamless) {
   einkDisplay.begin();
 
   // Lower CPU frequency while waiting on the panel's BUSY line (the SDK engages this only past
-  // ~20ms of waiting), restoring on completion. Reuses HalPowerManager::setPowerSaving(), so it
-  // naturally stays at normal speed whenever a HalPowerManager::Lock is held or WiFi is active --
-  // never light sleep, which can drop the X3 power latch.
+  // ~20ms of waiting), restoring on completion. The waiting task's power locks are suspended;
+  // other tasks and WiFi still protect normal speed. Never light sleep, which can drop the X3 latch.
   einkDisplay.setBusyWaitHooks(&HalPowerManager::beginDisplayBusyWait, &HalPowerManager::endDisplayBusyWait);
 
   if (seamless) {

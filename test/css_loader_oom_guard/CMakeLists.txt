@@ -50,6 +50,8 @@ add_test(NAME CssLoaderOomGuard.RealBookShape
          COMMAND CssLoaderOomGuardHarness book-shape)
 add_test(NAME CssLoaderOomGuard.ReadFailureAfterRule
          COMMAND CssLoaderOomGuardHarness read-failure)
+add_test(NAME CssLoaderOomGuard.DeterministicLimits
+         COMMAND CssLoaderOomGuardHarness deterministic-limits)
 add_test(NAME CssLoaderOomGuard.CascadeAndHiddenSemantics
          COMMAND CssLoaderOomGuardHarness semantics)
 add_test(NAME CssLoaderOomGuard.CacheIntegrityAndVersion
