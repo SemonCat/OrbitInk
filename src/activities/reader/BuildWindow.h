@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cstdint>
+#include <optional>
+
 // Pure decision logic for "does the background section build still have work the reader
 // actually needs right now?" -- shared by EpubReaderActivity's build tick (which does the
 // work) and its skipLoopDelay() (which decides whether to burn CPU waiting for it).
@@ -13,6 +16,20 @@
 // effect and must only be evaluated at the tick site. skipLoopDelay() reads the cached
 // buildHeapPaused instead, exactly as before.
 namespace readerbuild {
+
+constexpr uint32_t REQUIRED_HEAP_WAIT_MS = 2000;
+
+// Required remote pagination cannot wait forever on the optional-work heap gate.
+// Recovery or leaving the required build starts a fresh grace period.
+inline bool requiredHeapWaitExpired(std::optional<uint32_t>& pausedSince, bool required, bool heapPaused,
+                                    uint32_t now) {
+  if (!required || !heapPaused) {
+    pausedSince.reset();
+    return false;
+  }
+  if (!pausedSince) pausedSince = now;
+  return static_cast<uint32_t>(now - *pausedSince) >= REQUIRED_HEAP_WAIT_MS;
+}
 
 // isPartial: a rebuild extending a previous session's partial. Its pageCount is pinned at the
 // partial's watermark until the build passes it, so the window comparison would wrongly read

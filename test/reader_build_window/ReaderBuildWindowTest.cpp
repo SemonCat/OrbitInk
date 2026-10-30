@@ -50,3 +50,31 @@ TEST(ReaderBuildWindow, WorkWhenReaderIsAheadOfTheBuild) {
 TEST(ReaderBuildWindow, WorkAtTheStartOfAFreshBuild) {
   EXPECT_TRUE(hasBuildWorkInWindow(true, false, /*pageCount=*/0, /*currentPage=*/0, kWindow));
 }
+
+TEST(ReaderBuildWindow, RequiredHeapPressureExpiresAfterTheGracePeriod) {
+  std::optional<uint32_t> pausedSince;
+  EXPECT_FALSE(readerbuild::requiredHeapWaitExpired(pausedSince, true, true, 0));
+  EXPECT_FALSE(readerbuild::requiredHeapWaitExpired(pausedSince, true, true, 1999));
+  EXPECT_TRUE(readerbuild::requiredHeapWaitExpired(pausedSince, true, true, 2000));
+  EXPECT_TRUE(readerbuild::requiredHeapWaitExpired(pausedSince, true, true, 2001));
+}
+
+TEST(ReaderBuildWindow, HeapRecoveryAndOptionalWorkResetRequiredWait) {
+  std::optional<uint32_t> pausedSince;
+  EXPECT_FALSE(readerbuild::requiredHeapWaitExpired(pausedSince, true, true, 100));
+  EXPECT_FALSE(readerbuild::requiredHeapWaitExpired(pausedSince, true, false, 2000));
+  EXPECT_FALSE(pausedSince.has_value());
+  EXPECT_FALSE(readerbuild::requiredHeapWaitExpired(pausedSince, true, true, 3000));
+  EXPECT_FALSE(readerbuild::requiredHeapWaitExpired(pausedSince, true, true, 4999));
+  EXPECT_FALSE(readerbuild::requiredHeapWaitExpired(pausedSince, false, true, 5000));
+  EXPECT_FALSE(pausedSince.has_value());
+  EXPECT_FALSE(readerbuild::requiredHeapWaitExpired(pausedSince, true, true, 6000));
+  EXPECT_TRUE(readerbuild::requiredHeapWaitExpired(pausedSince, true, true, 8000));
+}
+
+TEST(ReaderBuildWindow, RequiredHeapWaitHandlesTheMillisRollover) {
+  std::optional<uint32_t> pausedSince;
+  EXPECT_FALSE(readerbuild::requiredHeapWaitExpired(pausedSince, true, true, UINT32_MAX - 1000));
+  EXPECT_FALSE(readerbuild::requiredHeapWaitExpired(pausedSince, true, true, 998));
+  EXPECT_TRUE(readerbuild::requiredHeapWaitExpired(pausedSince, true, true, 999));
+}

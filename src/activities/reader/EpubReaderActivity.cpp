@@ -538,6 +538,22 @@ void EpubReaderActivity::loop() {
     }
   }
 
+  if (readerbuild::requiredHeapWaitExpired(remoteBuildHeapPausedSince,
+                                           remotePositionPending && section && section->isBuilding(), buildHeapPaused,
+                                           static_cast<uint32_t>(millis())) &&
+      !RenderLock::peek()) {
+    RenderLock lock;
+    // Recheck after acquiring the render lock: a completed render may have freed the heap.
+    if (remotePositionPending && hasBuildWorkInWindow() && !buildTickHeapGate()) {
+      LOG_ERR("ERS", "Required remote pagination stopped after persistent heap pressure");
+      remoteBuildFailed = true;
+      section.reset();  // Release retained parser state; the durable raw anchor stays pending.
+      requestUpdate();
+    } else {
+      remoteBuildHeapPausedSince.reset();
+    }
+  }
+
   if (remotePositionPending) {
     if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
       finish();

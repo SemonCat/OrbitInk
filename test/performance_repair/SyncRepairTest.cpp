@@ -299,5 +299,13 @@ TEST(SyncReaderContract, PendingAnchorUsesBudgetedBuildAndSuppressesPlaceholderS
   ASSERT_NE(flush, std::string::npos);
   EXPECT_LT(source.find("if (remotePositionPending)", flush), source.find("saveProgress(", flush));
   EXPECT_LT(source.find("quickResumeSkipRenderEligible = false", flush), source.find("saveProgress(", flush));
+  const auto pressure = source.find("readerbuild::requiredHeapWaitExpired(");
+  ASSERT_NE(pressure, std::string::npos);
+  const auto pending = source.find("if (remotePositionPending) {", pressure);
+  const auto failure = source.substr(pressure, pending - pressure);
+  EXPECT_NE(failure.find("!buildTickHeapGate()"), std::string::npos);
+  EXPECT_NE(failure.find("remoteBuildFailed = true"), std::string::npos);
+  EXPECT_NE(failure.find("section.reset()"), std::string::npos);
+  EXPECT_EQ(failure.find("ProgressSyncDeferred::clear"), std::string::npos);
 }
 }  // namespace

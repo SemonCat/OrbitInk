@@ -183,6 +183,7 @@ class EpubReaderActivity final : public Activity {
   bool remotePositionPending = false;
   bool remoteApplyAttempted = false;
   bool remoteBuildFailed = false;
+  std::optional<uint32_t> remoteBuildHeapPausedSince;
 
   // Position observed by the last render() tick, regardless of whether it was actually written --
   // detects a genuine page/spine change so a no-op re-render (menu/bookmark/screenshot) doesn't
