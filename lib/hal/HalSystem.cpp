@@ -12,6 +12,7 @@
 #include "Logging.h"
 #include "esp_debug_helpers.h"
 #include "esp_flash.h"
+#include "esp_memory_utils.h"
 #include "esp_ota_ops.h"
 #include "esp_private/esp_cpu_internal.h"
 #include "esp_private/esp_system_attr.h"
@@ -94,9 +95,18 @@ void IRAM_ATTR __wrap_panic_print_backtrace(const void* frame, int core) {
 
   // Copied from components/esp_system/port/arch/riscv/panic_arch.c
   uint32_t sp = (uint32_t)((RvExcFrame*)frame)->sp;
+  // A corrupt SP (stack overflow, wild pointer) must not fault again inside the panic handler.
+  // The trap registers above, including SP itself, are still reported. Ported from CrossPoint
+  // 9d2f234 (#3377).
+  constexpr uint32_t captureBytes = 1024;
+  if (!esp_stack_ptr_is_sane(sp) || sp > UINT32_MAX - captureBytes ||
+      !esp_ptr_in_dram(reinterpret_cast<const void*>(sp + captureBytes - 1))) {
+    __real_panic_print_backtrace(frame, core);
+    return;
+  }
   const int per_line = 8;
   int depth = 0;
-  for (int x = 0; x < 1024; x += per_line * sizeof(uint32_t)) {
+  for (uint32_t x = 0; x < captureBytes; x += per_line * sizeof(uint32_t)) {
     uint32_t* spp = (uint32_t*)(sp + x);
     // panic_print_hex(sp + x);
     // panic_print_str(": ");
