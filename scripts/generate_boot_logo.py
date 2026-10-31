@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Regenerate the 120x120 1-bit boot/sleep logo from its editable SVG.
 
-    python scripts/generate_boot_logo.py            # write src/images/Logo120.h + Logo120.png
-    python scripts/generate_boot_logo.py --check    # fail if the header is stale
+    python scripts/generate_boot_logo.py                      # write src/images/Logo120.h
+    python scripts/generate_boot_logo.py --preview out.png    # also write an upright preview
+    python scripts/generate_boot_logo.py --check              # fail if the header is stale
 
 Reuses convert_icon.py's rasterize/rotate/pack steps (cairosvg + Pillow from
 scripts/requirements.txt). GfxRenderer::drawImage() copies bits to the panel unrotated and
 Portrait maps logical (x, y) to panel (y, H-1-x), so the stored bitmap is the upright art
-rotated 90 degrees counter-clockwise; MSB-first, 1 = white. Logo120.png is the upright,
-thresholded preview of exactly what the panel shows.
+rotated 90 degrees counter-clockwise; MSB-first, 1 = white. --preview writes the upright,
+thresholded image of exactly what the panel shows (src/images/Logo120.png is a separate
+user-guide asset and is not generated here).
 """
 
 import argparse
@@ -38,6 +40,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--svg", type=Path, default=ROOT / "src/images/logo.svg")
     parser.add_argument("--out-dir", type=Path, default=ROOT / "src/images")
+    parser.add_argument("--preview", type=Path)
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
     header, preview = render(args.svg)
@@ -49,8 +52,10 @@ def main():
         return 0
     args.out_dir.mkdir(parents=True, exist_ok=True)
     target.write_text(header)
-    preview.convert("1").save(args.out_dir / "Logo120.png")
-    print(f"Wrote {target} and {args.out_dir / 'Logo120.png'}")
+    print(f"Wrote {target}")
+    if args.preview:
+        preview.convert("1").save(args.preview)
+        print(f"Wrote {args.preview}")
     return 0
 
 

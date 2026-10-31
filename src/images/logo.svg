@@ -1,7 +1,7 @@
 <svg width="120" height="120" viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
   <!-- OrbitInk boot mark: open book in front of a single orbital arc with a satellite dot.
        1-bit e-paper source: solid black on white, no gradients. Edit here, then run
-       scripts/generate_boot_logo.py to regenerate src/images/Logo120.h and Logo120.png. -->
+       scripts/generate_boot_logo.py to regenerate src/images/Logo120.h. -->
   <rect width="120" height="120" fill="#fff"/>
   <path d="M19 54 C30 32 62 14 98 22" fill="none" stroke="#000" stroke-width="7" stroke-linecap="round"/>
   <circle cx="99" cy="22" r="8" fill="#000"/>
