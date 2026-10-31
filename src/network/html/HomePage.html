@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>CrossFade Reader</title>
+    <title>OrbitInk Reader</title>
     <style>
       :root {
         --font-color: #333;
@@ -98,7 +98,7 @@
     </style>
   </head>
   <body>
-    <h1>📚 CrossFade Reader</h1>
+    <h1>📚 OrbitInk Reader</h1>
 
     <div class="nav-links">
       <a href="/" class="active">Home</a>
@@ -134,7 +134,7 @@
 
     <div class="card">
       <p style="text-align: center; color: #95a5a6; margin: 0">
-        CrossFade E-Reader • Open Source
+        OrbitInk E-Reader • Open Source
       </p>
     </div>
   <script>
@@ -145,7 +145,7 @@
           throw new Error('Failed to fetch status: ' + response.status + ' ' + response.statusText);
         }
         const data = await response.json();
-        document.getElementById('version').textContent = data.version || 'N/A';
+        document.getElementById('version').textContent = data.displayVersion || data.version || 'N/A';
         document.getElementById('serial').textContent = data.serial;
         document.getElementById('ip-address').textContent = data.ip || 'N/A';
         document.getElementById('free-heap').textContent = data.freeHeap

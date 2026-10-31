@@ -294,10 +294,13 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkCustomChannel() {
     return VERIFY_ERROR;
   }
 
-  char label[ota_manifest::MAX_FIELD_LEN + 40];
-  snprintf(label, sizeof(label), "%s %s (build %u)", checkedChannel == 1 ? "nightly" : "stable",
-           manifest->version, static_cast<unsigned>(manifest->build));
-  latestVersion = label;
+  if (ota_channel::isNightly(ota_channel::selectedChannel(checkedChannel))) {
+    latestVersion = ota_channel::NIGHTLY_LABEL;
+  } else {
+    char label[ota_manifest::MAX_FIELD_LEN + 40];
+    snprintf(label, sizeof(label), "stable %s (build %u)", manifest->version, static_cast<unsigned>(manifest->build));
+    latestVersion = label;
+  }
   otaUrl = manifest->url;
   otaSize = manifest->size;
   totalSize = otaSize;

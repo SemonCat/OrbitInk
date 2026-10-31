@@ -488,6 +488,7 @@ void CrossPointWebServer::handleStatus() const {
 
   JsonDocument doc;
   doc["version"] = CROSSPOINT_VERSION;
+  doc["displayVersion"] = ota_channel::displayVersion(ota_channel::CHANNEL, CROSSPOINT_VERSION);
   doc["ip"] = ipAddr;
   doc["mode"] = apMode ? "AP" : "STA";
   doc["rssi"] = apMode ? 0 : WiFi.RSSI();
@@ -2227,6 +2228,7 @@ void CrossPointWebServer::handleUpdatePage() const {
 void CrossPointWebServer::sendFirmwareState(const int code, const char* error, const char* image) const {
   JsonDocument doc;
   doc["version"] = CROSSPOINT_VERSION;
+  doc["displayVersion"] = ota_channel::displayVersion(ota_channel::CHANNEL, CROSSPOINT_VERSION);
   doc["build"] = ota_channel::BUILD;
   doc["limit"] = firmware_staging::partitionLimit();
   if (firmwareApply != FirmwareApply::NONE) {

@@ -151,6 +151,7 @@ class ChannelCi(unittest.TestCase):
         create = next(call for call in calls if call[:3] == ("release", "create", "orbitink-b1101"))
         self.assertIn("--prerelease", create)
         self.assertIn("--latest=false", create)
+        self.assertEqual(create[create.index("--title") + 1], "nightly")
         self.assertTrue(any(call[:3] == ("release", "upload", "nightly") for call in calls))
         with patch.dict(os.environ, {**ENV, "GITHUB_ACTOR": "other"}, clear=True), self.assertRaises(ValueError):
             ci.publish(SimpleNamespace(channel="stable"))

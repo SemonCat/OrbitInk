@@ -133,8 +133,11 @@ void OtaUpdateActivity::render(RenderLock&&) {
     // confirmPopup -- so the popup doesn't cover it.
     const auto infoTop = pageHeight / 2 - 20 - (height * 2 + metrics.verticalSpacing * 2);
     renderer.drawCenteredText(UI_10_FONT_ID, infoTop, tr(STR_NEW_UPDATE), true, EpdFontFamily::BOLD);
+    const std::string currentVersion = ota_channel::isNightly(ota_channel::CHANNEL)
+                                           ? std::string(ota_channel::NIGHTLY_LABEL)
+                                           : std::string(CROSSPOINT_VERSION) + CURRENT_BUILD_SUFFIX;
     renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, infoTop + height + metrics.verticalSpacing,
-                      (std::string(tr(STR_CURRENT_VERSION)) + CROSSPOINT_VERSION + CURRENT_BUILD_SUFFIX).c_str());
+                      (std::string(tr(STR_CURRENT_VERSION)) + currentVersion).c_str());
     renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, infoTop + height * 2 + metrics.verticalSpacing * 2,
                       (std::string(tr(STR_NEW_VERSION)) + updater.getLatestVersion()).c_str());
 

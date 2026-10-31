@@ -234,3 +234,15 @@ TEST(OtaChannel, MissingOrCorruptPreferenceDefaultsStable) {
   EXPECT_STREQ(ota_channel::manifestUrl(1),
               "https://github.com/SemonCat/OrbitInk/releases/download/nightly/manifest.json");
 }
+
+TEST(OtaChannel, NightlyDisplayIsExactlyNightlyWithoutTouchingSignedIdentity) {
+  EXPECT_STREQ(ota_channel::displayVersion("orbitink-x3-nightly", "1.3.3"), "nightly");
+  EXPECT_STREQ(ota_channel::displayVersion(ota_channel::selectedChannel(1), "1.3.3-rc+abc"), "nightly");
+  EXPECT_STREQ(ota_channel::displayVersion("bookorbit-x3", "1.3.3"), "1.3.3");
+  EXPECT_STREQ(ota_channel::displayVersion("orbitink-x3-nightly-old", "1.3.3"), "1.3.3");
+  EXPECT_FALSE(ota_channel::isNightly(ota_channel::STABLE));
+  // The display label never enters the machine identity the signer reads back out of the image.
+  EXPECT_STREQ(ota_channel::IDENTITY, "CrossFade-OTA/" CROSSFADE_OTA_CHANNEL "/x3-zh-TW/build=" CROSSFADE_OTA_STR(
+                                          CROSSFADE_OTA_BUILD));
+  EXPECT_STREQ(ota_channel::NIGHTLY, "orbitink-x3-nightly");
+}

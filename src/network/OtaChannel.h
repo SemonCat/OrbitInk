@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string_view>
 
 // Identity and endpoint of the custom X3 zh-TW online update channel. Set from platformio.ini
 // [env:x3_zh_tw_custom]; every other build leaves CROSSFADE_OTA_MANIFEST_URL undefined and keeps the
@@ -43,6 +44,14 @@ inline const char* manifestUrl(const uint8_t value) {
   return value == 1 ? "https://github.com/SemonCat/OrbitInk/releases/download/nightly/manifest.json" : MANIFEST_URL;
 }
 inline uint8_t normalizeSelection(const uint64_t value) { return value == 1 ? 1 : 0; }
+
+// Display only: a nightly image or offer is labelled exactly "nightly". Ordering, update detection
+// and the signed identity keep using BUILD/CHANNEL/IDENTITY and the manifest's own fields.
+inline constexpr char NIGHTLY_LABEL[] = "nightly";
+constexpr bool isNightly(const char* channel) { return std::string_view(channel) == NIGHTLY; }
+inline const char* displayVersion(const char* channel, const char* runtimeVersion) {
+  return isNightly(channel) ? NIGHTLY_LABEL : runtimeVersion;
+}
 
 // Sent as the User-Agent of every custom-channel request, and the literal
 // scripts/make_ota_manifest.py reads back out of firmware.bin to fill the manifest's

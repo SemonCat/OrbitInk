@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>CrossFade Reader - 韌體更新</title>
+    <title>OrbitInk Reader - 韌體更新</title>
     <style>
       :root {
         --font-color: #333;
@@ -77,7 +77,7 @@
     </style>
   </head>
   <body>
-    <h1>📚 CrossFade Reader</h1>
+    <h1>📚 OrbitInk Reader</h1>
 
     <div class="nav-links">
       <a href="/">Home</a>
@@ -140,6 +140,12 @@
         return body && body.image && body.image !== 'OK' ? base + '（' + body.image + '）' : base;
       }
 
+      // Display only: nightly reads exactly "nightly"; build stays the machine ordering field.
+      function versionLabel(s) {
+        if (s.displayVersion === 'nightly') return 'nightly';
+        return s.version + (s.build ? '（build ' + s.build + '）' : '');
+      }
+
       function render() {
         $('staged').hidden = !staged;
         if (staged) {
@@ -161,7 +167,7 @@
           clearTimeout(timer);
         }
         status = await resp.json();
-        $('current').textContent = '版本 ' + status.version + (status.build ? '（build ' + status.build + '）' : '') +
+        $('current').textContent = '版本 ' + versionLabel(status) +
           '；可寫入上限 ' + status.limit.toLocaleString() + ' 位元組';
         staged = status.state === 'STAGED' ? { size: status.size, sha256: status.sha256 } : null;
         if (status.state === 'APPLYING') show('裝置正在等待確認。', 'info');
@@ -266,7 +272,7 @@
           try {
             const s = await loadStatus();
             if (s.state === 'APPLYING') continue;
-            if (s.build !== before) show('更新完成：版本 ' + s.version + '（build ' + s.build + '）', 'ok');
+            if (s.build !== before) show('更新完成：版本 ' + versionLabel(s), 'ok');
             else show('裝置未套用更新（已取消或失敗），暫存檔已刪除。', 'err');
             busy = false;
             render();

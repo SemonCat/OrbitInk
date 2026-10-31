@@ -144,7 +144,8 @@ def publish(args):
         "README-zh-TW.md", "SHA256SUMS")]
     # Publish the immutable release completely before advancing a channel endpoint.
     gh("release", "create", tag, *assets, "--repo", REPOSITORY, "--target", os.environ["GITHUB_SHA"],
-       "--title", f"OrbitInk {args.channel} build {args.build}",
+       # Display only: nightly is titled exactly "nightly"; the unique tag carries the build.
+       "--title", "nightly" if args.channel == "nightly" else f"OrbitInk {args.channel} build {args.build}",
        "--notes-file", str(args.directory / "README-zh-TW.md"),
        "--prerelease" if args.channel == "nightly" else "--latest",
        *(["--latest=false"] if args.channel == "nightly" else []))
