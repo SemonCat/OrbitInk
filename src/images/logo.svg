@@ -1,3 +1,12 @@
-<svg width="162" height="180" viewBox="0 0 162 180" fill="none" xmlns="http://www.w3.org/2000/svg">
-<path d="M141.133 1.93774C150.102 -3.44192 161.517 3.01665 161.521 13.4749V166.526C161.517 176.984 150.102 183.442 141.133 178.063L80.7588 141.837L20.3867 178.063C11.4176 183.442 0.00328866 176.984 0 166.526V13.4749C0.00337257 3.01685 11.4176 -3.44137 20.3867 1.93774L80.7598 38.1614L141.133 1.93774ZM121.275 117.524L92.3848 134.864L147.281 167.811C148.277 168.408 149.542 167.685 149.545 166.526V100.567L121.275 117.524ZM14.2393 12.1897C13.2438 11.5924 11.979 12.3152 11.9756 13.4749V86.6125L74.7725 124.29V48.51L14.2393 12.1897Z" fill="black"/>
+<svg width="120" height="120" viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
+  <!-- OrbitInk boot mark: open book in front of a single orbital arc with a satellite dot.
+       1-bit e-paper source: solid black on white, no gradients. Edit here, then run
+       scripts/generate_boot_logo.py to regenerate src/images/Logo120.h and Logo120.png. -->
+  <rect width="120" height="120" fill="#fff"/>
+  <path d="M19 54 C30 32 62 14 98 22" fill="none" stroke="#000" stroke-width="7" stroke-linecap="round"/>
+  <circle cx="99" cy="22" r="8" fill="#000"/>
+  <g fill="#fff" stroke="#000" stroke-width="7" stroke-linejoin="round">
+    <path d="M60 58 C49 50 33 48 19 51 L19 95 C33 92 49 94 60 102 Z"/>
+    <path d="M60 58 C71 50 87 48 101 51 L101 95 C87 92 71 94 60 102 Z"/>
+  </g>
 </svg>
