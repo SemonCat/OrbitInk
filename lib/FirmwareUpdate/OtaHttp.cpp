@@ -99,7 +99,7 @@ void ResponseHeadParser::finishLine() {
   }
   const size_t nameLen = static_cast<size_t>(colon - line);
   const bool kept = nameIs(line, nameLen, "location") || nameIs(line, nameLen, "content-length") ||
-                    nameIs(line, nameLen, "transfer-encoding");
+                    nameIs(line, nameLen, "transfer-encoding") || nameIs(line, nameLen, "content-range");
   if (!kept) return;
   if (lineOverflow) {
     // A truncated value of a header we act on cannot be trusted.
@@ -113,8 +113,41 @@ void ResponseHeadParser::finishLine() {
   handleHeader(line, nameLen, value, static_cast<size_t>(end - value));
 }
 
+namespace {
+// Parses decimal digits [p, end) into v (at most 15 digits); false on anything else.
+bool parseDecimal(const char*& p, const char* end, uint64_t& v) {
+  const char* start = p;
+  v = 0;
+  while (p < end && *p >= '0' && *p <= '9') {
+    if (p - start >= 15) return false;
+    v = v * 10 + static_cast<uint64_t>(*p++ - '0');
+  }
+  return p > start;
+}
+}  // namespace
+
 void ResponseHeadParser::handleHeader(const char* name, const size_t nameLen, const char* value,
                                       const size_t valueLen) {
+  if (nameIs(name, nameLen, "content-range")) {
+    const char* p = value;
+    const char* end = value + valueLen;
+    uint64_t first = 0, last = 0, total = 0;
+    if (haveRange || valueLen < 6 || strncasecmp(p, "bytes ", 6) != 0) {
+      st = Status::ERROR;
+      return;
+    }
+    p += 6;
+    if (!parseDecimal(p, end, first) || p >= end || *p++ != '-' || !parseDecimal(p, end, last) || p >= end ||
+        *p++ != '/' || !parseDecimal(p, end, total) || p != end || first > last || last >= total) {
+      st = Status::ERROR;
+      return;
+    }
+    haveRange = true;
+    rangeStart = first;
+    rangeEnd = last;
+    rangeComplete = total;
+    return;
+  }
   if (nameIs(name, nameLen, "transfer-encoding")) {
     transferEncoding = true;
     return;
@@ -195,6 +228,35 @@ bool isAllowedHost(const char* host) {
     if (strcasecmp(host, allowed) == 0) return true;
   }
   return false;
+}
+
+Continuation checkContinuation(const ResponseHeadParser& head, const uint64_t offset, const uint64_t total) {
+  if (offset == 0) {
+    if (head.statusCode() != 200) return Continuation::BAD_STATUS;
+    if (!head.hasContentLength() || head.contentLength() != total) return Continuation::BAD_LENGTH;
+    return Continuation::OK;
+  }
+  if (head.statusCode() != 206) return Continuation::BAD_STATUS;
+  if (!head.hasContentRange() || head.rangeFirst() != offset || head.rangeTotal() != total ||
+      head.rangeLast() != total - 1) {
+    return Continuation::BAD_RANGE;
+  }
+  if (!head.hasContentLength() || head.contentLength() != total - offset) return Continuation::BAD_LENGTH;
+  return Continuation::OK;
+}
+
+const char* continuationName(const Continuation c) {
+  switch (c) {
+    case Continuation::OK:
+      return "OK";
+    case Continuation::BAD_STATUS:
+      return "RESUME_BAD_STATUS";
+    case Continuation::BAD_RANGE:
+      return "RESUME_BAD_RANGE";
+    case Continuation::BAD_LENGTH:
+      return "RESUME_BAD_LENGTH";
+  }
+  return "?";
 }
 
 }  // namespace ota_http

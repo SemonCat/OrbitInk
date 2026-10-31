@@ -328,3 +328,33 @@ TEST(FirmwareUploadSession, HexRoundTripIsStrict) {
   EXPECT_FALSE(firmware_upload::hexToSha(hex, back));
   EXPECT_FALSE(firmware_upload::hexToSha(nullptr, back));
 }
+
+// A resumed download (OtaFetch::getResumable) reaches the session as two attempts' bytes in order.
+// The session must see exactly one contiguous stream: same staged bytes and SHA as a single pass,
+// and a resume that repeated or skipped bytes must not stage.
+TEST(FirmwareUploadSession, ResumedStreamStagesIdenticallyAndAMisalignedResumeDoesNot) {
+  const auto img = buildEspImage({90000, 5000});
+  const auto sha = sha256Of(img);
+  const size_t cut = img.size() * 2 / 5;  // ~40%, where the 1801 download stopped
+  {
+    FakeSink sink;
+    Session s(sink, PARTITION, 0x0005);
+    ASSERT_TRUE(s.begin(img.size(), sha.data(), img.size()));
+    ASSERT_TRUE(s.write(img.data(), cut));
+    ASSERT_TRUE(s.write(img.data() + cut, img.size() - cut));
+    ASSERT_TRUE(s.end());
+    EXPECT_EQ(sink.staged, img);
+  }
+  for (const long shift : {-1L, 1L}) {  // a continuation one byte early (repeat) or late (gap)
+    FakeSink sink;
+    Session s(sink, PARTITION, 0x0005);
+    ASSERT_TRUE(s.begin(img.size(), sha.data(), img.size()));
+    ASSERT_TRUE(s.write(img.data(), cut));
+    const size_t from = static_cast<size_t>(static_cast<long>(cut) + shift);
+    std::vector<uint8_t> rest(img.begin() + from, img.end());
+    rest.resize(img.size() - cut, 0);  // the fetch delivers exactly the declared remainder
+    s.write(rest.data(), rest.size());
+    EXPECT_FALSE(s.end()) << shift;
+    EXPECT_TRUE(sink.staged.empty()) << shift;
+  }
+}

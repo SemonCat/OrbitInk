@@ -24,12 +24,14 @@ bool writeAll(freeink::SecureClient& c, const char* s) {
   return c.write(reinterpret_cast<const uint8_t*>(s), n) == n;
 }
 
-bool sendRequest(freeink::SecureClient& c, const ota_http::Url& url, const char* userAgent) {
+bool sendRequest(freeink::SecureClient& c, const ota_http::Url& url, const char* userAgent, const uint64_t offset) {
   char port[16] = "";
   if (url.port != 443) snprintf(port, sizeof(port), ":%u", static_cast<unsigned>(url.port));
+  char range[48] = "";
+  if (offset > 0) snprintf(range, sizeof(range), "\r\nRange: bytes=%llu-", static_cast<unsigned long long>(offset));
   // Written piecewise: the path can be ~1.5 KB, so no request string is assembled on the heap.
   return writeAll(c, "GET ") && writeAll(c, url.path) && writeAll(c, " HTTP/1.1\r\nHost: ") && writeAll(c, url.host) &&
-         writeAll(c, port) && writeAll(c, "\r\nUser-Agent: ") && writeAll(c, userAgent) &&
+         writeAll(c, port) && writeAll(c, "\r\nUser-Agent: ") && writeAll(c, userAgent) && writeAll(c, range) &&
          writeAll(c, "\r\nAccept: */*\r\nConnection: close\r\n\r\n");
 }
 
@@ -80,10 +82,14 @@ namespace {
 struct HopState {
   int hop = -1;
   char host[sizeof(ota_diagnostics::Record::host)] = {};  // copied: the Url is freed on return
+  uint64_t delivered = 0;  // body bytes handed to onData by this attempt
+  const char* stop = "";   // why a body ended early: the cases readSome() folds into "closed"
 };
 
+// `offset` > 0 resumes a download: the request carries "Range: bytes=offset-" and the final reply must
+// continue the same `expectedLength`-byte object exactly there (ota_http::checkContinuation).
 Result getImpl(const char* urlText, const char* userAgent, const size_t maxBytes, const size_t expectedLength,
-               const DataFn onData, void* ctx, int* lastStatus, HopState& at) {
+               const uint64_t offset, const DataFn onData, void* ctx, int* lastStatus, HopState& at) {
   if (lastStatus) *lastStatus = 0;
   auto url = makeUniqueNoThrow<ota_http::Url>();
   auto next = makeUniqueNoThrow<ota_http::Url>();
@@ -116,7 +122,7 @@ Result getImpl(const char* urlText, const char* userAgent, const size_t maxBytes
       LOG_ERR("OTAF", "connect/handshake failed: %s", url->host);
       return Result::CONNECT_FAILED;
     }
-    if (!sendRequest(*client, *url, userAgent)) {
+    if (!sendRequest(*client, *url, userAgent, offset)) {
       client->stop();
       return Result::WRITE_FAILED;
     }
@@ -164,7 +170,7 @@ Result getImpl(const char* urlText, const char* userAgent, const size_t maxBytes
       *url = *next;
       continue;
     }
-    if (code != 200) {
+    if (code != 200 && !(offset > 0 && code == 206)) {
       client->stop();
       LOG_ERR("OTAF", "HTTP %d", code);
       return Result::HTTP_STATUS;
@@ -173,8 +179,18 @@ Result getImpl(const char* urlText, const char* userAgent, const size_t maxBytes
       client->stop();
       return Result::NO_LENGTH;
     }
+    if (offset > 0) {
+      const auto continuation = ota_http::checkContinuation(*head, offset, expectedLength);
+      if (continuation != ota_http::Continuation::OK) {
+        client->stop();
+        at.stop = ota_http::continuationName(continuation);
+        LOG_ERR("OTAF", "resume at %llu rejected: %s (HTTP %d)", static_cast<unsigned long long>(offset), at.stop, code);
+        return Result::BAD_RESPONSE;
+      }
+    }
     const uint64_t length = head->contentLength();
-    if (length > maxBytes || (expectedLength > 0 && length != expectedLength)) {
+    const uint64_t expectedBody = expectedLength > 0 ? expectedLength - offset : 0;
+    if (length > maxBytes || (expectedLength > 0 && length != expectedBody)) {
       client->stop();
       LOG_ERR("OTAF", "body length %llu outside limit %u / expected %u", static_cast<unsigned long long>(length),
               static_cast<unsigned>(maxBytes), static_cast<unsigned>(expectedLength));
@@ -190,18 +206,24 @@ Result getImpl(const char* urlText, const char* userAgent, const size_t maxBytes
         return Result::SINK_ABORTED;
       }
       remaining -= bodyLen;
+      at.delivered += bodyLen;
     }
     idleSince = millis();
     while (remaining > 0) {
       resetTaskWatchdogIfSubscribed();
-      const int n = readSome(*client, buf.get(), remaining < CHUNK ? remaining : CHUNK);
+      const int raw = client->read(buf.get(), remaining < CHUNK ? remaining : CHUNK);
+      const int n = raw > 0 ? raw : (raw < 0 || (!client->connected() && client->available() == 0)) ? -1 : 0;
       if (n < 0) {
+        // raw < 0: wolfSSL read failed (fatal TLS/transport error). raw == 0 with no connection: the
+        // peer ended TLS cleanly (close_notify) or the TCP socket dropped without one.
+        at.stop = raw < 0 ? "TLS_READ_ERROR" : "PEER_CLOSED";
         client->stop();
-        LOG_ERR("OTAF", "closed with %u bytes outstanding", static_cast<unsigned>(remaining));
+        LOG_ERR("OTAF", "%s with %u bytes outstanding", at.stop, static_cast<unsigned>(remaining));
         return Result::TRUNCATED;
       }
       if (n == 0) {
         if (millis() - idleSince > IDLE_TIMEOUT_MS) {
+          at.stop = "BODY_IDLE";
           client->stop();
           return Result::TIMEOUT;
         }
@@ -214,27 +236,61 @@ Result getImpl(const char* urlText, const char* userAgent, const size_t maxBytes
         return Result::SINK_ABORTED;
       }
       remaining -= static_cast<size_t>(n);
+      at.delivered += static_cast<uint64_t>(n);
     }
     client->stop();
     return Result::OK;
   }
   return Result::TOO_MANY_REDIRECTS;
 }
+
+void fillFailure(ota_diagnostics::Record* diag, const HopState& at, const int* lastStatus) {
+  if (!diag) return;
+  // Sampled after the failing hop's client and parser are gone: what the next attempt would see.
+  diag->hop = at.hop;
+  diag->setHost(at.host);
+  diag->httpStatus = lastStatus ? *lastStatus : 0;
+  diag->freeHeap = ESP.getFreeHeap();
+  diag->maxAlloc = ESP.getMaxAllocHeap();
+  if (at.stop[0] != '\0') diag->detail = at.stop;
+}
 }  // namespace
 
 Result get(const char* urlText, const char* userAgent, const size_t maxBytes, const size_t expectedLength,
            const DataFn onData, void* ctx, int* lastStatus, ota_diagnostics::Record* diag) {
   HopState at;
-  const Result result = getImpl(urlText, userAgent, maxBytes, expectedLength, onData, ctx, lastStatus, at);
-  if (result != Result::OK && diag) {
-    // Sampled after the failing hop's client and parser are gone: what the next attempt would see.
-    diag->hop = at.hop;
-    diag->setHost(at.host);
-    diag->httpStatus = lastStatus ? *lastStatus : 0;
-    diag->freeHeap = ESP.getFreeHeap();
-    diag->maxAlloc = ESP.getMaxAllocHeap();
-  }
+  const Result result = getImpl(urlText, userAgent, maxBytes, expectedLength, 0, onData, ctx, lastStatus, at);
+  if (result != Result::OK) fillFailure(diag, at, lastStatus);
   return result;
+}
+
+Result getResumable(const char* urlText, const char* userAgent, const size_t expectedLength, const DataFn onData,
+                    void* ctx, int* lastStatus, ota_diagnostics::Record* diag) {
+  if (expectedLength == 0) return Result::BAD_URL;  // resume needs the signed total to validate against
+  uint64_t delivered = 0;
+  int resumes = 0;
+  while (true) {
+    HopState at;
+    const uint64_t before = delivered;
+    const Result result =
+        getImpl(urlText, userAgent, expectedLength, expectedLength, delivered, onData, ctx, lastStatus, at);
+    delivered += at.delivered;
+    if (diag) diag->resumes = static_cast<uint8_t>(resumes);
+    if (result == Result::OK) return result;
+    // Only a body that stopped part-way is resumed, and only while each attempt still makes progress.
+    const bool interrupted = result == Result::TRUNCATED || result == Result::TIMEOUT;
+    if (!interrupted || !ota_http::shouldResume(resumes, before, delivered, expectedLength)) {
+      fillFailure(diag, at, lastStatus);
+      return result;
+    }
+    resumes++;
+    LOG_INF("OTAF", "resuming at %llu/%u after %s/%s (resume %d/%d)", static_cast<unsigned long long>(delivered),
+            static_cast<unsigned>(expectedLength), resultName(result), at.stop, resumes, ota_http::MAX_RESUMES);
+    for (int i = 0; i < 10; ++i) {  // 1 s for the link to settle, watchdog fed
+      resetTaskWatchdogIfSubscribed();
+      delay(100);
+    }
+  }
 }
 
 }  // namespace ota_fetch

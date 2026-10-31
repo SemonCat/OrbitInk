@@ -41,6 +41,7 @@ struct Record {
   const char* detail = "";  // optional second static name (session error, image status)
   int httpStatus = 0;
   int hop = -1;             // redirect hop that failed, -1 if not a network failure
+  uint8_t resumes = 0;      // firmware download range resumes used before the failure
   char host[48] = {};       // host of the failing hop
   uint32_t bytesDone = 0;   // firmware bytes received / written before the failure
   uint32_t bytesTotal = 0;
@@ -76,6 +77,7 @@ inline void summary(const Record& r, char* out, const size_t cap) {
   if (r.detail[0] != '\0') append("/%s", r.detail);
   if (r.httpStatus > 0) append(" HTTP %d", r.httpStatus);
   if (r.hop >= 0) append(" hop%d %s", r.hop, r.host);
+  if (r.resumes > 0) append(" resumes %u", static_cast<unsigned>(r.resumes));
   if (r.freeHeap > 0) append(" heap %u/%u", static_cast<unsigned>(r.freeHeap), static_cast<unsigned>(r.maxAlloc));
 }
 
@@ -113,9 +115,9 @@ inline size_t report(const Record& r, const char* identity, const char* version,
   summary(r, line, sizeof(line));
   const int w = snprintf(out, cap,
                          "OrbitInk OTA failure\nRunning: %s (%s)\nSummary: %s\nPhase: %s\nError: %s\nDetail: %s\n"
-                         "HTTP status: %d\nHop: %d\nHost: %s\nBytes: %u/%u\nFree heap: %u\nLargest free block: %u\n",
+                         "HTTP status: %d\nHop: %d\nHost: %s\nResumes: %u\nBytes: %u/%u\nFree heap: %u\nLargest free block: %u\n",
                          identity ? identity : "", version ? version : "", line, phaseName(r.phase), r.error, r.detail,
-                         r.httpStatus, r.hop, r.host, static_cast<unsigned>(r.bytesDone),
+                         r.httpStatus, r.hop, r.host, static_cast<unsigned>(r.resumes), static_cast<unsigned>(r.bytesDone),
                          static_cast<unsigned>(r.bytesTotal), static_cast<unsigned>(r.freeHeap),
                          static_cast<unsigned>(r.maxAlloc));
   if (w < 0) return 0;

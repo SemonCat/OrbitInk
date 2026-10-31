@@ -36,6 +36,11 @@ class ResponseHeadParser {
   uint64_t contentLength() const { return length; }
   bool hasTransferEncoding() const { return transferEncoding; }
   const char* location() const { return haveLocation ? loc : nullptr; }
+  // "Content-Range: bytes first-last/total", strictly parsed (no "*", no unknown total).
+  bool hasContentRange() const { return haveRange; }
+  uint64_t rangeFirst() const { return rangeStart; }
+  uint64_t rangeLast() const { return rangeEnd; }
+  uint64_t rangeTotal() const { return rangeComplete; }
 
  private:
   void finishLine();
@@ -54,7 +59,32 @@ class ResponseHeadParser {
   bool transferEncoding = false;
   bool haveLocation = false;
   char loc[LOCATION_MAX + 1] = {};
+  bool haveRange = false;
+  uint64_t rangeStart = 0;
+  uint64_t rangeEnd = 0;
+  uint64_t rangeComplete = 0;
 };
+
+// Firmware download resume (OtaFetch). After the body stopped early, the fetch is re-issued from the
+// signed URL with "Range: bytes=<offset>-"; only a reply that continues EXACTLY at `offset` of the
+// same `total`-byte object may feed the stream. The caller's size/SHA-256/image checks still run over
+// every byte, so a wrong continuation can only fail the update, never install it.
+enum class Continuation : uint8_t {
+  OK,             // 200 for a fresh request, or a 206 continuing at offset of the same object
+  BAD_STATUS,     // anything else (incl. 200 to a resume: the server ignored Range)
+  BAD_RANGE,      // 206 without, or with a different, Content-Range
+  BAD_LENGTH,     // Content-Length missing or not the remaining span
+};
+Continuation checkContinuation(const ResponseHeadParser& head, uint64_t offset, uint64_t total);
+const char* continuationName(Continuation c);
+
+// Resume budget: at most MAX_RESUMES extra requests per download, and each only after the previous
+// attempt delivered new bytes (a server that keeps failing at the same point is not retried forever).
+constexpr int MAX_RESUMES = 3;
+inline bool shouldResume(const int resumesSoFar, const uint64_t deliveredBefore, const uint64_t deliveredNow,
+                         const uint64_t total) {
+  return resumesSoFar < MAX_RESUMES && deliveredNow > deliveredBefore && deliveredNow < total;
+}
 
 struct Url {
   char host[HOST_MAX + 1] = {};

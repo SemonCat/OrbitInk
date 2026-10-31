@@ -353,15 +353,17 @@ OtaUpdater::OtaUpdaterError OtaUpdater::installCustom(ProgressCallback onProgres
   DownloadCtx dl{&session, &processedSize, otaSize, onProgress, ctx, -1};
   int status = 0;
   const auto fetched =
-      ota_fetch::get(otaUrl.c_str(), ota_channel::IDENTITY, otaSize, otaSize, &writeFirmware, &dl, &status, &lastFailure);
+      ota_fetch::getResumable(otaUrl.c_str(), ota_channel::IDENTITY, otaSize, &writeFirmware, &dl, &status, &lastFailure);
   esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
 
   if (fetched != ota_fetch::Result::OK) {
     LOG_ERR("OTA", "Firmware download failed: %s (HTTP %d, session %s)", ota_fetch::resultName(fetched), status,
             firmware_upload::errorName(session.lastError()));
     lastFailure.bytesDone = static_cast<uint32_t>(processedSize);
+    // The fetch's own stop cause (PEER_CLOSED, TLS_READ_ERROR, ...) unless the session rejected bytes.
     fail(lastFailure, ota_diagnostics::Phase::DOWNLOAD, ota_fetch::resultName(fetched),
-         session.lastError() == firmware_upload::Error::NONE ? "" : firmware_upload::errorName(session.lastError()));
+         session.lastError() == firmware_upload::Error::NONE ? lastFailure.detail
+                                                             : firmware_upload::errorName(session.lastError()));
     const bool rejected = session.state() == firmware_upload::State::IDLE &&
                           session.lastError() != firmware_upload::Error::NONE &&
                           session.lastError() != firmware_upload::Error::IO;

@@ -194,3 +194,69 @@ TEST(OtaHttp, RecordedGithubReleaseRedirectHeadParsesWithinDeviceLimits) {
     EXPECT_TRUE(ota_http::isAllowedHost(next.host));
   }
 }
+
+// ---- Firmware download resume (Range continuation) ------------------------------------------------
+namespace {
+ota_http::ResponseHeadParser parseHead(const std::string& head) {
+  ota_http::ResponseHeadParser p;
+  p.feed(reinterpret_cast<const uint8_t*>(head.data()), head.size());
+  return p;
+}
+}  // namespace
+
+TEST(OtaHttp, ParsesContentRangeStrictly) {
+  // Shape GitHub's release host returned to "Range: bytes=2374342-" for build 1801 (2026-11-01).
+  auto p = parseHead("HTTP/1.1 206 Partial Content\r\nContent-Length: 3550490\r\n"
+                     "Content-Range: bytes 2374342-5924831/5924832\r\n\r\n");
+  ASSERT_EQ(p.status(), ota_http::ResponseHeadParser::Status::DONE);
+  ASSERT_TRUE(p.hasContentRange());
+  EXPECT_EQ(p.rangeFirst(), 2374342u);
+  EXPECT_EQ(p.rangeLast(), 5924831u);
+  EXPECT_EQ(p.rangeTotal(), 5924832u);
+  for (const char* bad : {"bytes */5924832", "bytes 1-2/*", "items 0-1/2", "bytes 5-4/9", "bytes 0-9/9", "bytes 1-2",
+                          "bytes  1-2/3", "bytes 1-2/3x", "bytes -1-2/3", "bytes 1234567890123456-1/2"}) {
+    auto q = parseHead(std::string("HTTP/1.1 206 Partial Content\r\nContent-Range: ") + bad + "\r\n\r\n");
+    EXPECT_EQ(q.status(), ota_http::ResponseHeadParser::Status::ERROR) << bad;
+  }
+  auto twice = parseHead("HTTP/1.1 206 X\r\nContent-Range: bytes 0-1/2\r\nContent-Range: bytes 0-1/2\r\n\r\n");
+  EXPECT_EQ(twice.status(), ota_http::ResponseHeadParser::Status::ERROR);
+}
+
+TEST(OtaHttp, ContinuationAcceptsOnlyTheExactRemainderOfTheSameObject) {
+  using ota_http::Continuation;
+  constexpr uint64_t total = 5924832, offset = 2374342;
+  const auto check = [&](const std::string& head, uint64_t at) {
+    return ota_http::checkContinuation(parseHead(head), at, total);
+  };
+  EXPECT_EQ(check("HTTP/1.1 200 OK\r\nContent-Length: 5924832\r\n\r\n", 0), Continuation::OK);
+  EXPECT_EQ(check("HTTP/1.1 206 P\r\nContent-Length: 3550490\r\nContent-Range: bytes 2374342-5924831/5924832\r\n\r\n",
+                  offset),
+            Continuation::OK);
+  // Server ignored Range and restarted at byte 0: feeding it would corrupt the stream.
+  EXPECT_EQ(check("HTTP/1.1 200 OK\r\nContent-Length: 5924832\r\n\r\n", offset), Continuation::BAD_STATUS);
+  EXPECT_EQ(check("HTTP/1.1 206 P\r\nContent-Length: 3550490\r\n\r\n", offset), Continuation::BAD_RANGE);
+  EXPECT_EQ(check("HTTP/1.1 206 P\r\nContent-Length: 3550491\r\nContent-Range: bytes 2374341-5924831/5924832\r\n\r\n",
+                  offset),
+            Continuation::BAD_RANGE);  // starts one byte early
+  EXPECT_EQ(check("HTTP/1.1 206 P\r\nContent-Length: 3550490\r\nContent-Range: bytes 2374342-5924831/5924833\r\n\r\n",
+                  offset),
+            Continuation::BAD_RANGE);  // a different object
+  EXPECT_EQ(check("HTTP/1.1 206 P\r\nContent-Length: 1000\r\nContent-Range: bytes 2374342-2375341/5924832\r\n\r\n",
+                  offset),
+            Continuation::BAD_RANGE);  // a partial slice, not the remainder
+  EXPECT_EQ(check("HTTP/1.1 206 P\r\nContent-Length: 999\r\nContent-Range: bytes 2374342-5924831/5924832\r\n\r\n",
+                  offset),
+            Continuation::BAD_LENGTH);
+  EXPECT_EQ(check("HTTP/1.1 206 P\r\nContent-Length: 5924832\r\nContent-Range: bytes 0-5924831/5924832\r\n\r\n", 0),
+            Continuation::BAD_STATUS);  // a fresh request must be a plain 200
+  EXPECT_EQ(check("HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\n\r\n", offset), Continuation::BAD_STATUS);
+}
+
+TEST(OtaHttp, ResumeBudgetRequiresProgressAndIsBounded) {
+  constexpr uint64_t total = 5924832;
+  EXPECT_TRUE(ota_http::shouldResume(0, 0, 2374342, total));
+  EXPECT_FALSE(ota_http::shouldResume(0, 2374342, 2374342, total));  // no new bytes this attempt
+  EXPECT_FALSE(ota_http::shouldResume(0, 0, total, total));          // nothing left
+  EXPECT_TRUE(ota_http::shouldResume(ota_http::MAX_RESUMES - 1, 10, 20, total));
+  EXPECT_FALSE(ota_http::shouldResume(ota_http::MAX_RESUMES, 10, 20, total));
+}
