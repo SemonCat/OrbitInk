@@ -287,13 +287,12 @@ void CrossPointWebServer::begin() {
   udpActive = udp.begin(LOCAL_UDP_PORT);
   LOG_DBG("WEB", "Discovery UDP %s on port %d", udpActive ? "enabled" : "failed", LOCAL_UDP_PORT);
 
-  // All request handlers run on the task that calls handleClient(). Register
-  // that task before any handler can call esp_task_wdt_reset().
-  const esp_err_t watchdogResult = esp_task_wdt_add(nullptr);
-  watchdogTaskRegistered = watchdogResult == ESP_OK;
-  if (!watchdogTaskRegistered) {
-    LOG_ERR("WEB", "Failed to register web server task with watchdog: %s", esp_err_to_name(watchdogResult));
-  }
+  // The task calling handleClient() (loopTask) is deliberately NOT subscribed to the task watchdog,
+  // as in CrossPoint and CrossMux ae22f6b4. A single response write to a slow or backgrounded browser
+  // can block up to ~10 s inside NetworkClient::write (10 x 1 s select retries), longer than the 5 s
+  // TWDT, so feeding it between entries cannot prevent a panic: an X3 core dump showed exactly that,
+  // loopTask in lwip_select under WebServer::sendContent from the file-list scan. Handlers keep their
+  // resetTaskWatchdogIfSubscribed() calls, which are no-ops unless another caller subscribed the task.
 
   running = true;
 
@@ -324,10 +323,6 @@ void CrossPointWebServer::abortWsUpload(const char* tag) {
 void CrossPointWebServer::stop() {
   if (!running || !server) {
     LOG_DBG("WEB", "stop() called but already stopped (running=%d, server=%p)", running, server.get());
-    if (watchdogTaskRegistered) {
-      esp_task_wdt_delete(nullptr);
-      watchdogTaskRegistered = false;
-    }
     return;
   }
 
@@ -371,11 +366,6 @@ void CrossPointWebServer::stop() {
   server.reset();
   LOG_DBG("WEB", "Web server stopped and deleted");
   LOG_DBG("WEB", "[MEM] Free heap after delete server: %d bytes", ESP.getFreeHeap());
-
-  if (watchdogTaskRegistered) {
-    esp_task_wdt_delete(nullptr);
-    watchdogTaskRegistered = false;
-  }
 
   // Note: Static upload variables (uploadFileName, uploadPath, uploadError) are declared
   // later in the file and will be cleared when they go out of scope or on next upload
@@ -522,7 +512,7 @@ void CrossPointWebServer::handleStatus() const {
   server->send(200, "application/json", response);
 }
 
-void CrossPointWebServer::scanFiles(const char* path, const std::function<void(FileInfo)>& callback) const {
+void CrossPointWebServer::scanFiles(const char* path, const std::function<bool(const FileInfo&)>& callback) const {
   HalFile root = Storage.open(path);
   if (!root) {
     LOG_DBG("WEB", "Failed to open directory: %s", path);
@@ -569,7 +559,10 @@ void CrossPointWebServer::scanFiles(const char* path, const std::function<void(F
         info.isEpub = isEpubFile(info.name);
       }
 
-      callback(info);
+      if (!callback(info)) {  // the consumer is gone (client disconnected): stop scanning
+        file.close();
+        break;
+      }
     }
 
     file.close();
@@ -620,7 +613,7 @@ void CrossPointWebServer::handleFileListData() const {
     if (written >= outputSize) {
       // JSON output truncated; skip this entry to avoid sending malformed JSON
       LOG_DBG("WEB", "Skipping file entry with oversized JSON for name: %s", info.name.c_str());
-      return;
+      return true;
     }
 
     if (seenFirst) {
@@ -629,6 +622,12 @@ void CrossPointWebServer::handleFileListData() const {
       seenFirst = true;
     }
     server->sendContent(output);
+    // A failed or timed-out write stops the client: every further entry would block another ~10 s.
+    if (!server->client().connected()) {
+      LOG_ERR("WEB", "File list client disconnected mid-listing; stopping");
+      return false;
+    }
+    return true;
   });
   server->sendContent("]");
   // End of streamed response, empty chunk to signal client
