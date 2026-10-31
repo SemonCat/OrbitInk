@@ -39,6 +39,8 @@ class HalFile {
     return static_cast<int>(n);
   }
 
+  size_t fileSize() const { return data_ ? data_->size() : 0; }
+
   bool close() {
     data_.reset();
     pos_ = 0;

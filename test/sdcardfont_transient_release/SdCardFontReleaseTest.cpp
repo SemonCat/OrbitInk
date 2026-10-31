@@ -44,8 +44,10 @@
 
 // Fail only the tiny fixture's bitmap sizes; all other real allocations run normally.
 static size_t rejectBitmapAtLeast = 0;
+static size_t largestNothrowArray = 0;
 void* operator new[](std::size_t size, const std::nothrow_t&) noexcept {
   if (rejectBitmapAtLeast && size >= rejectBitmapAtLeast && size <= 4096 && size % 300 == 0) return nullptr;
+  largestNothrowArray = std::max(largestNothrowArray, size);
   try {
     return ::operator new[](size);
   } catch (...) {
@@ -77,6 +79,19 @@ void appendU32(std::vector<uint8_t>& buf, uint32_t v) {
 // against the real generator during the X3 KOSync review this fix followed
 // up on) and the on-disk struct sizes SdCardFont.cpp's own static_asserts
 // enforce (EpdGlyph=16B, EpdUnicodeInterval=12B).
+// Real .cpfont glyphs carry exactly the packed size of width*height 2-bit pixels (SdCardFont
+// rejects anything else as corrupt), so derive dimensions from each requested bitmap size.
+// Height starts at 2 so the default 2-byte glyph stays the historical 4x2.
+std::pair<uint8_t, uint8_t> dimsFor2Bit(uint32_t bytes) {
+  for (uint32_t h = bytes ? 2 : 0; h <= 255; ++h) {
+    for (uint32_t w = 1; w <= 255; ++w) {
+      if ((w * h + 3) / 4 == bytes) return {static_cast<uint8_t>(w), static_cast<uint8_t>(h)};
+    }
+  }
+  ADD_FAILURE() << "no 2-bit glyph dimensions pack to " << bytes << " bytes";
+  return {0, 0};
+}
+
 std::vector<uint8_t> buildCpfont(const std::vector<uint32_t>& codepoints, uint16_t bitmapBytes = 2,
                                  const std::vector<uint16_t>* bitmapSizes = nullptr) {
   std::vector<uint32_t> allCodepoints = codepoints;
@@ -105,8 +120,9 @@ std::vector<uint8_t> buildCpfont(const std::vector<uint32_t>& codepoints, uint16
   std::vector<uint8_t> glyphs;
   for (uint32_t i = 0; i < NUM_GLYPHS; i++) {
     const uint32_t glyphBitmapBytes = bitmapSizes ? (*bitmapSizes)[i] : bitmapBytes;
-    appendU8(glyphs, 4);                                           // width
-    appendU8(glyphs, 2);                                           // height
+    const auto dims = dimsFor2Bit(glyphBitmapBytes);
+    appendU8(glyphs, dims.first);                                  // width
+    appendU8(glyphs, dims.second);                                 // height
     appendU16(glyphs, 16);                                         // advanceX (12.4 fixed point == 1px)
     appendI16(glyphs, 0);                                          // left
     appendI16(glyphs, 2);                                          // top
@@ -174,9 +190,28 @@ std::vector<uint8_t> buildFiveGlyphCpfont(uint16_t bitmapBytes = 2) {
   return buildCpfont({'A', 'B', 'C', 'D'}, bitmapBytes);
 }
 
-std::vector<uint8_t> buildVariedFiveGlyphCpfont() {
-  const std::vector<uint16_t> bitmapSizes = {2, 2, 50000, 50000, 2};
-  return buildCpfont({'A', 'B', 'C', 'D'}, 2, &bitmapSizes);
+// A, B small; C..I near the largest real glyph (254x251 2-bit), seven of which exceed the
+// 96 KiB union arena cap; then the replacement glyph.
+std::vector<uint8_t> buildVariedLargeGlyphCpfont() {
+  const std::vector<uint16_t> bitmapSizes = {2, 2, 15939, 15939, 15939, 15939, 15939, 15939, 15939, 2};
+  return buildCpfont({'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I'}, 2, &bitmapSizes);
+}
+
+// Glyph record `index` of the single style written by buildCpfont().
+size_t glyphRecordOffset(const std::vector<uint8_t>& file, uint32_t index) {
+  uint32_t intervalCount = 0;
+  std::memcpy(&intervalCount, file.data() + 32 + 4, sizeof(intervalCount));
+  return 64 + intervalCount * 12 + index * sizeof(EpdGlyph);
+}
+
+EpdGlyph readGlyphRecord(const std::vector<uint8_t>& file, uint32_t index) {
+  EpdGlyph glyph{};
+  std::memcpy(&glyph, file.data() + glyphRecordOffset(file, index), sizeof(glyph));
+  return glyph;
+}
+
+void writeGlyphRecord(std::vector<uint8_t>& file, uint32_t index, const EpdGlyph& glyph) {
+  std::memcpy(file.data() + glyphRecordOffset(file, index), &glyph, sizeof(glyph));
 }
 
 }  // namespace
@@ -338,19 +373,19 @@ TEST_F(SdCardFontReleaseTest, RetainedUnionDownstreamBitmapFailureRetriesRequest
 }
 
 TEST_F(SdCardFontReleaseTest, ActualUnionBytesDropOptionalRetentionBeforeGrowth) {
-  HalStorage::registerTestFile(TEST_PATH, buildVariedFiveGlyphCpfont());
+  HalStorage::registerTestFile(TEST_PATH, buildVariedLargeGlyphCpfont());
   ASSERT_TRUE(font_.load(TEST_PATH));
   ASSERT_EQ(font_.prewarm("AB", 0x01, false), 0);
 
   // The old resident average is tiny, so the admission estimate would pass;
-  // the actual C/D metadata makes the five-glyph union exceed 96 KiB. The
+  // the actual C..I metadata makes the union exceed 96 KiB. The
   // optional union must be dropped before allocating that oversized bitmap,
   // while the requested page remains eligible for the normal arena retry.
   HalStorage::resetReadCount();
-  EXPECT_EQ(font_.prewarm("CD", 0x01, false), 0);
+  EXPECT_EQ(font_.prewarm("CDEFGHI", 0x01, false), 0);
   EXPECT_GT(HalStorage::readCount(), 0u);
   EXPECT_NE(font_.getEpdFont(0)->getGlyph('C'), nullptr);
-  EXPECT_NE(font_.getEpdFont(0)->getGlyph('D'), nullptr);
+  EXPECT_NE(font_.getEpdFont(0)->getGlyph('I'), nullptr);
 
   // The oversized union must have dropped optional AB before bitmap growth.
   // Re-requesting AB therefore requires SD reads; an uncapped retained union
@@ -729,4 +764,129 @@ TEST_F(SdCardFontReleaseTest, ExtendingSmallResidentPageReadsOnlyNewGlyphs) {
   EXPECT_EQ(font_.getEpdFont(0)->getGlyph('A')->advanceX, 16);
   font_.releaseTransientRenderCache();
   EXPECT_FALSE(miniDataResident(font_, 0));
+}
+
+// --- Corrupt .cpfont glyph entries (adapted from CrossPoint c1d99e5, #4091) ---
+// Every SD glyph-record consumer must treat an entry the file cannot back as an empty glyph:
+// no bitmap allocation sized from it, no read of its bytes as pixels, zero advance.
+
+namespace {
+const EpdGlyph* miniGlyph(SdCardFont& font, uint32_t cp) {
+  const EpdFontData* data = font.getEpdFont(0)->data;
+  for (uint32_t i = 0; i < data->intervalCount; ++i) {
+    const auto& iv = data->intervals[i];
+    if (cp >= iv.first && cp <= iv.last) return data->glyph + iv.offset + cp - iv.first;
+  }
+  return nullptr;
+}
+
+// 'A'..'D' are glyph indices 0..3; index 2 ('C') is corrupted by `corrupt`.
+template <typename Corrupt>
+std::vector<uint8_t> fontWithCorruptC(Corrupt corrupt) {
+  auto file = buildCpfont({'A', 'B', 'C', 'D'}, 300);
+  EpdGlyph glyph = readGlyphRecord(file, 2);
+  corrupt(glyph, file);
+  writeGlyphRecord(file, 2, glyph);
+  return file;
+}
+
+std::vector<std::vector<uint8_t>> corruptFonts() {
+  return {
+      fontWithCorruptC([](EpdGlyph& g, auto&) { g.dataLength = 49335; }),      // upstream case: oversized
+      fontWithCorruptC([](EpdGlyph& g, auto&) { g.dataLength = 299; }),        // short: renderer over-read
+      fontWithCorruptC([](EpdGlyph& g, auto&) { g.width = 255; g.height = 255; }),  // dims disagree
+      fontWithCorruptC([](EpdGlyph& g, auto&) { g.dataOffset = 0xFFFFFF00u; }),     // offset overflow
+      fontWithCorruptC([](EpdGlyph& g, auto& file) { g.dataOffset = static_cast<uint32_t>(file.size()); }),
+  };
+}
+}  // namespace
+
+TEST(SdCardFontCorruptGlyph, PrewarmDrawsCorruptEntryAsMissingWithoutSizingTheArena) {
+  for (const auto& bytes : corruptFonts()) {
+    HalStorage::resetTestFiles();
+    HalStorage::registerTestFile(TEST_PATH, bytes);
+    SdCardFont font;
+    ASSERT_TRUE(font.load(TEST_PATH));
+    largestNothrowArray = 0;
+    ASSERT_EQ(font.prewarm("ABCD", 1, false), 0);
+    EXPECT_LT(largestNothrowArray, 4096u);  // never a 49335-byte (or wrapped) bitmap arena
+    const EpdGlyph* c = miniGlyph(font, 'C');
+    ASSERT_NE(c, nullptr);
+    EXPECT_EQ(c->dataLength, 0);
+    EXPECT_EQ(c->width, 0);
+    EXPECT_EQ(c->advanceX, 0);
+    for (const uint32_t cp : {'A', 'B', 'D'}) {
+      const EpdGlyph* ok = miniGlyph(font, cp);
+      ASSERT_NE(ok, nullptr);
+      EXPECT_EQ(ok->dataLength, 300);
+      EXPECT_EQ(ok->advanceX, 16);
+    }
+  }
+}
+
+TEST(SdCardFontCorruptGlyph, AdvanceMeasurementAndBatchTableReportZeroForCorruptEntry) {
+  for (const auto& bytes : corruptFonts()) {
+    HalStorage::resetTestFiles();
+    HalStorage::registerTestFile(TEST_PATH, bytes);
+    SdCardFont cold;
+    ASSERT_TRUE(cold.load(TEST_PATH));
+    EXPECT_EQ(cold.measureAdvance('C', 0), 0);
+    EXPECT_EQ(cold.measureAdvance('D', 0), 16);
+    SdCardFont batch;
+    ASSERT_TRUE(batch.load(TEST_PATH));
+    ASSERT_EQ(batch.buildAdvanceTable("ABCD", 1), 0);
+    EXPECT_EQ(batch.getAdvance('C', 0), 0);
+    EXPECT_EQ(batch.getAdvance('B', 0), 16);
+  }
+}
+
+TEST(SdCardFontCorruptGlyph, OverflowMissCachesAnEmptyGlyphWithoutAllocatingOrRereading) {
+  for (const auto& bytes : corruptFonts()) {
+    HalStorage::resetTestFiles();
+    HalStorage::registerTestFile(TEST_PATH, bytes);
+    SdCardFont font;
+    ASSERT_TRUE(font.load(TEST_PATH));
+    ASSERT_EQ(font.prewarm("A", 1, false), 0);
+    largestNothrowArray = 0;
+    HalStorage::resetReadCount();
+    const EpdGlyph* c = font.getEpdFont(0)->getGlyph('C');
+    ASSERT_NE(c, nullptr);
+    EXPECT_EQ(c->dataLength, 0);
+    EXPECT_EQ(c->advanceX, 0);
+    EXPECT_EQ(font.getOverflowBitmap(c), nullptr);
+    EXPECT_EQ(largestNothrowArray, 0u);
+    EXPECT_EQ(HalStorage::readCount(), 1u);  // metadata only; no bitmap read
+    HalStorage::resetReadCount();
+    EXPECT_EQ(font.getEpdFont(0)->getGlyph('C'), c);  // cached, not re-read
+    EXPECT_EQ(HalStorage::readCount(), 0u);
+    const EpdGlyph* d = font.getEpdFont(0)->getGlyph('D');
+    ASSERT_NE(d, nullptr);
+    EXPECT_EQ(d->dataLength, 300);
+    ASSERT_NE(font.getOverflowBitmap(d), nullptr);
+  }
+}
+
+TEST(SdCardFontCorruptGlyph, TruncatedBitmapSectionLosesOnlyGlyphsPastTheEnd) {
+  auto bytes = buildCpfont({'A', 'B', 'C', 'D'}, 300);
+  bytes.resize(bytes.size() - 300 - 1);  // REPLACEMENT_GLYPH (last) is gone and D loses its final byte
+  HalStorage::resetTestFiles();
+  HalStorage::registerTestFile(TEST_PATH, bytes);
+  SdCardFont font;
+  ASSERT_TRUE(font.load(TEST_PATH));
+  ASSERT_EQ(font.prewarm("ABCD", 1, false), 0);
+  EXPECT_EQ(miniGlyph(font, 'C')->dataLength, 300);
+  EXPECT_EQ(miniGlyph(font, 'D')->dataLength, 0);
+  EXPECT_EQ(miniGlyph(font, REPLACEMENT_GLYPH)->dataLength, 0);
+}
+
+TEST(SdCardFontCorruptGlyph, ValidFontKeepsItsReadCountsAndBitmaps) {
+  HalStorage::resetTestFiles();
+  HalStorage::registerTestFile(TEST_PATH, buildCpfont({'A', 'B', 'C', 'D'}, 300));
+  SdCardFont font;
+  ASSERT_TRUE(font.load(TEST_PATH));
+  HalStorage::resetReadCount();
+  ASSERT_EQ(font.prewarm("ABCD", 1, false), 0);
+  // One contiguous metadata run + one contiguous bitmap run for the five sorted glyphs.
+  EXPECT_EQ(HalStorage::readCount(), 10u);
+  for (const uint32_t cp : {'A', 'B', 'C', 'D'}) EXPECT_EQ(miniGlyph(font, cp)->dataLength, 300);
 }

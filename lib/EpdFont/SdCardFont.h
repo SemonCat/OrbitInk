@@ -309,6 +309,8 @@ class SdCardFont {
 
   Stats stats_;
   uint32_t contentHash_ = 0;
+  uint32_t fileSize_ = 0;                     // bounds glyph bitmap ranges (glyphEntryValid)
+  mutable uint8_t corruptGlyphsLogged_ = 0;  // first few corrupt entries per load are logged
   bool loaded_ = false;
 
   // Per-style helpers
@@ -325,6 +327,12 @@ class SdCardFont {
   void applyKernLigaturePointers(PerStyle& s, EpdFontData& data) const;
   void applyGlyphMissCallback(uint8_t styleIdx);
   int32_t findGlobalGlyphIndex(const PerStyle& s, uint32_t codepoint) const;
+  // False for a glyph record the file cannot back (a corrupt .cpfont): its data length must be
+  // the packed size of its pixels and its bitmap must lie inside the file. Every path that
+  // consumes a record from SD (prewarm, advance measurement/batch, overflow miss) treats such
+  // an entry as an empty glyph: no bitmap read or allocation, zero advance. Load already
+  // rejects interval layouts that could index past glyphCount.
+  bool glyphEntryValid(const PerStyle& s, const EpdGlyph& glyph, uint32_t codepoint) const;
   int fetchAdvancesForCodepoints(uint32_t* codepoints, uint32_t cpCount, uint8_t styleMask);
   template <typename Iter>
   int buildAdvanceTableRange(Iter begin, Iter end, bool includeSpace, bool includeHyphen, uint8_t styleMask,
