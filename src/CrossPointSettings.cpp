@@ -97,7 +97,7 @@ bool CrossPointSettings::isValidDeviceName(const std::string& name) {
   return name.size() >= MIN_DEVICE_NAME_LENGTH && name.size() <= MAX_DEVICE_NAME_LENGTH;
 }
 
-std::string CrossPointSettings::getDefaultDeviceName() { return gpio.deviceIsX3() ? "CrossFade X3" : "CrossFade X4"; }
+std::string CrossPointSettings::getDefaultDeviceName() { return gpio.deviceIsX3() ? "OrbitInk X3" : "OrbitInk X4"; }
 
 std::string CrossPointSettings::getEffectiveDeviceName() const {
   return isValidDeviceName(deviceName) ? deviceName : getDefaultDeviceName();

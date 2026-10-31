@@ -2,7 +2,7 @@ _language_name: "繁體中文"
 _language_code: "ZH_TW"
 _order: "31"
 
-STR_CROSSPOINT: "CrossFade"
+STR_CROSSPOINT: "OrbitInk"
 STR_BOOTING: "開機中"
 STR_SLEEPING: "睡眠中"
 STR_ENTERING_SLEEP: "即將進入睡眠"

@@ -483,7 +483,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
 
   // True if name's length falls within [MIN_DEVICE_NAME_LENGTH, MAX_DEVICE_NAME_LENGTH].
   static bool isValidDeviceName(const std::string& name);
-  // Hardware-based fallback used when deviceName is empty or too short ("CrossFade X3"/"CrossFade X4").
+  // Hardware-based fallback used when deviceName is empty or too short ("OrbitInk X3"/"OrbitInk X4"; display label only, sync identity is statsDeviceId).
   static std::string getDefaultDeviceName();
   // deviceName if isValidDeviceName() accepts it, else getDefaultDeviceName().
   std::string getEffectiveDeviceName() const;
