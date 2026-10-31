@@ -106,11 +106,9 @@ std::string CrossPointSettings::getEffectiveDeviceName() const {
 void CrossPointSettings::toJson(JsonDocument& doc) const {
   const CrossPointSettings& s = *this;
 
-  for (const auto& info : getSettingsList()) {
-    if (!info.key) continue;
-    // Dynamic entries (KOReader etc.) are stored in their own files — skip.
-    if (!info.valuePtr && !info.stringOffset) continue;
-
+  // Borrowed in place: a getSettingsList() copy per save cost every SettingInfo plus a font-size
+  // rebuild. Same entries in the same order (dynamic entries are stored in their own files).
+  forEachPersistedSetting([&](const SettingInfo& info) {
     if (info.stringOffset) {
       const char* strPtr = (const char*)&s + info.stringOffset;
       if (info.obfuscated) {
@@ -123,7 +121,7 @@ void CrossPointSettings::toJson(JsonDocument& doc) const {
     } else {
       doc[info.key] = s.*(info.valuePtr);
     }
-  }
+  });
 
   // Front button remap — managed by RemapFrontButtons sub-activity, not in SettingsList.
   doc["frontButtonBack"] = frontButtonBack;
@@ -180,11 +178,7 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
 
   auto clamp = [](uint8_t val, uint8_t maxVal, uint8_t def) -> uint8_t { return val < maxVal ? val : def; };
 
-  for (const auto& info : getSettingsList()) {
-    if (!info.key) continue;
-    // Dynamic entries (KOReader etc.) are stored in their own files — skip.
-    if (!info.valuePtr && !info.stringOffset) continue;
-
+  forEachPersistedSetting([&](const SettingInfo& info) {
     if (info.stringOffset) {
       // destPtr starts out holding the struct-initializer default; it stays that
       // way unless the document actually carries a value for this key.
@@ -193,7 +187,7 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
         LOG_ERR("CPS", "Misconfigured SettingInfo: stringMaxLen is 0 for key '%s'", info.key);
         destPtr[0] = '\0';
         needsResave = true;
-        continue;
+        return;
       }
 
       bool loaded = false;
@@ -239,7 +233,7 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
       }
       s.*(info.valuePtr) = v;
     }
-  }
+  });
 
 #if CROSSFADE_CUSTOM_ZH_TW
   const JsonVariantConst channelValue = doc["otaChannel"];

@@ -182,14 +182,9 @@ inline SettingInfo buildDictionarySetting(const std::vector<DictionaryEntry>& di
 // Each entry has a key (for JSON API) and category (for grouping).
 // ACTION-type entries and entries without a key are device-only.
 //
-// The static list is constructed exactly once (master's optimization, #1086 +
-// #1636) so the per-entry SettingInfo cost is paid once; every call then copies
-// it. When an SdCardFontRegistry is supplied AND has SD card fonts installed,
-// the font-family entry is replaced in that copy with a registry-aware version.
-// The font-size entry is always rebuilt, since its options are point sizes read
-// from the active family rather than a fixed enum.
-inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* registry = nullptr,
-                                                const std::vector<DictionaryEntry>* dictionaries = nullptr) {
+// The static base list, built once per boot on first use (master's optimization, #1086 + #1636). Persistence borrows it in place
+// (forEachPersistedSetting); UI callers take an owning copy (getSettingsList).
+inline const std::vector<SettingInfo>& baseSettingsList() {
   static const std::vector<SettingInfo> baseList = [] {
     // Enum settings are persisted as numeric values. Assign these labels by enum
     // value so a reordered menu or enum cannot silently swap their behavior.
@@ -464,21 +459,37 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
     }
     return v;
   }();
+  return baseList;
+}
 
-  std::vector<SettingInfo> v = baseList;
-  if (!BoardConfig::hasTouch()) {
-    v.erase(std::remove_if(v.begin(), v.end(),
-                           [](const SettingInfo& s) { return s.nameId == StrId::STR_TOUCH_READER_CONTROLS; }),
-            v.end());
+// Board-dependent entries getSettingsList() drops. Shared with forEachPersistedSetting so load,
+// save and the UI agree on the key set (a dropped entry is neither shown nor persisted).
+inline bool settingHiddenOnThisBoard(const SettingInfo& s) {
+  if (!BoardConfig::hasTouch()) return s.nameId == StrId::STR_TOUCH_READER_CONTROLS;
+  return s.nameId == StrId::STR_FRONT_BTN_FOLLOW_ORIENTATION || s.nameId == StrId::STR_SUNLIGHT_FADING_FIX;
+}
+
+// Visits, in list order and by const reference, exactly the entries CrossPointSettings::toJson()/
+// fromJson() persist generically (valuePtr or stringOffset, not hidden on this board). Unlike
+// getSettingsList() it copies no SettingInfo (labels, enum vectors, std::function captures) and
+// rebuilds no font entries -- those carry no valuePtr and are persisted by hand. Synchronous;
+// the references are into the boot-lifetime base list.
+template <typename Fn>
+void forEachPersistedSetting(Fn&& fn) {
+  for (const SettingInfo& info : baseSettingsList()) {
+    if (!info.key || (!info.valuePtr && !info.stringOffset) || settingHiddenOnThisBoard(info)) continue;
+    fn(info);
   }
-  if (BoardConfig::hasTouch()) {
-    v.erase(std::remove_if(v.begin(), v.end(),
-                           [](const SettingInfo& s) {
-                             return s.nameId == StrId::STR_FRONT_BTN_FOLLOW_ORIENTATION ||
-                                    s.nameId == StrId::STR_SUNLIGHT_FADING_FIX;
-                           }),
-            v.end());
-  }
+}
+
+// Owning copy of the base list for UI and web callers, which filter and edit it. When an
+// SdCardFontRegistry is supplied AND has SD card fonts installed, the font-family entry is
+// replaced in that copy with a registry-aware version. The font-size entry is always rebuilt,
+// since its options are point sizes read from the active family rather than a fixed enum.
+inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* registry = nullptr,
+                                                const std::vector<DictionaryEntry>* dictionaries = nullptr) {
+  std::vector<SettingInfo> v = baseSettingsList();
+  v.erase(std::remove_if(v.begin(), v.end(), settingHiddenOnThisBoard), v.end());
   if (registry && registry->getFamilyCount() > 0) {
     auto it = std::find_if(v.begin(), v.end(), [](const SettingInfo& s) { return s.nameId == StrId::STR_FONT_FAMILY; });
     if (it != v.end()) {
