@@ -37,7 +37,7 @@ target_include_directories(PerformanceStorageTest PRIVATE
   ${REPO_ROOT}/lib/Serialization ${REPO_ROOT}/lib/Memory ${REPO_ROOT}/lib/Utf8
   ${REPO_ROOT}/lib/EpdFont ${REPO_ROOT}/lib/expat ${REPO_ROOT}/lib/XmlParserUtils
 )
-target_compile_definitions(PerformanceStorageTest PRIVATE XML_GE=0 XML_CONTEXT_BYTES=1024)
+target_compile_definitions(PerformanceStorageTest PRIVATE XML_GE=0 XML_CONTEXT_BYTES=0)
 target_compile_options(PerformanceStorageTest PRIVATE
   "$<$<COMPILE_LANGUAGE:CXX>:-include;${REPO_ROOT}/test/epub_ports/host_stubs/Arduino.h>"
   -ffunction-sections -fdata-sections)

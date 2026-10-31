@@ -38,4 +38,4 @@ endif()
 target_link_libraries(EpubPortsTest PRIVATE crosspoint_test_common GTest::gtest_main)
 gtest_discover_tests(EpubPortsTest)
 
-target_compile_definitions(EpubPortsTest PRIVATE XML_GE=0 XML_CONTEXT_BYTES=1024)
+target_compile_definitions(EpubPortsTest PRIVATE XML_GE=0 XML_CONTEXT_BYTES=0)
