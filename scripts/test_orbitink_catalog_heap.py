@@ -46,6 +46,7 @@ class CatalogHeapPreparation(unittest.TestCase):
 
     def test_hook_frees_font_caches_under_the_render_lock(self):
         body = function_body(self.text, "void BookOrbitCatalogBrowserActivity::prepareCatalogHeap(void* activity)")
+        body = re.sub(r"//[^\n]*", "", body)  # code only: the explanatory comment names requestUpdate
         lock = body.find("RenderLock lock;")
         release = body.find("forceReleaseTransientCaches()")
         self.assertGreaterEqual(lock, 0)
