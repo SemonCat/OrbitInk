@@ -79,6 +79,32 @@ inline void summary(const Record& r, char* out, const size_t cap) {
   if (r.freeHeap > 0) append(" heap %u/%u", static_cast<unsigned>(r.freeHeap), static_cast<unsigned>(r.maxAlloc));
 }
 
+// Greedy word wrap of a summary into at most `maxLines` NUL-terminated lines of at most
+// `lineChars` characters (a longer single word is cut). Stack-only; returns the line count.
+constexpr size_t WRAP_LINE_CHARS = 40;
+constexpr size_t WRAP_MAX_LINES = 4;
+inline size_t wrap(const char* text, char (*lines)[WRAP_LINE_CHARS + 1], const size_t maxLines) {
+  size_t count = 0;
+  size_t len = 0;
+  for (const char* p = text; p && *p && count < maxLines;) {
+    while (*p == ' ') p++;
+    if (!*p) break;
+    size_t word = 0;
+    while (p[word] && p[word] != ' ') word++;
+    if (len > 0 && len + 1 + word > WRAP_LINE_CHARS) {
+      lines[count++][len] = '\0';
+      len = 0;
+      if (count == maxLines) break;
+    }
+    if (len > 0) lines[count][len++] = ' ';
+    const size_t take = word < WRAP_LINE_CHARS - len ? word : WRAP_LINE_CHARS - len;
+    for (size_t i = 0; i < take; i++) lines[count][len++] = p[i];
+    p += word;
+  }
+  if (len > 0 && count < maxLines) lines[count++][len] = '\0';
+  return count;
+}
+
 // Multi-line text for /ota_report.txt; `identity` is the running image's OTA identity literal.
 // Returns the length written (always < cap).
 inline size_t report(const Record& r, const char* identity, const char* version, char* out, const size_t cap) {

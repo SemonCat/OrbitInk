@@ -197,10 +197,11 @@ void OtaUpdateActivity::render(RenderLock&&) {
     if (failureDetail[0] != '\0') {
       int y = top + height + metrics.verticalSpacing;
       const auto smallHeight = renderer.getLineHeight(SMALL_FONT_ID);
-      const auto lines =
-          renderer.wrappedText(SMALL_FONT_ID, failureDetail, pageWidth - metrics.contentSidePadding * 2, 4);
-      for (const auto& line : lines) {
-        renderer.drawCenteredText(SMALL_FONT_ID, y, line.c_str());
+      // Fixed stack lines: this screen follows OOM failures, so no wrapped-text vector/strings.
+      char lines[ota_diagnostics::WRAP_MAX_LINES][ota_diagnostics::WRAP_LINE_CHARS + 1];
+      const size_t count = ota_diagnostics::wrap(failureDetail, lines, ota_diagnostics::WRAP_MAX_LINES);
+      for (size_t i = 0; i < count; i++) {
+        renderer.drawCenteredText(SMALL_FONT_ID, y, lines[i]);
         y += smallHeight;
       }
       renderer.drawCenteredText(SMALL_FONT_ID, y + metrics.verticalSpacing, OTA_REPORT_PATH);

@@ -283,3 +283,20 @@ TEST(OtaDiagnostics, FailureSummaryNamesPhaseErrorHopHostAndHeap) {
   EXPECT_EQ(ota_diagnostics::report(r, "", "", tiny, sizeof(tiny)), sizeof(tiny) - 1);
   EXPECT_STREQ(ota_diagnostics::phaseName(ota_diagnostics::Phase::MANIFEST_POLICY), "MANIFEST_POLICY");
 }
+
+TEST(OtaDiagnostics, WrapsSummaryIntoBoundedStackLines) {
+  char lines[ota_diagnostics::WRAP_MAX_LINES][ota_diagnostics::WRAP_LINE_CHARS + 1];
+  const char* summary = "DOWNLOAD CONNECT_FAILED hop2 release-assets.githubusercontent.com heap 41234/18432";
+  ASSERT_EQ(ota_diagnostics::wrap(summary, lines, ota_diagnostics::WRAP_MAX_LINES), 3u);
+  EXPECT_STREQ(lines[0], "DOWNLOAD CONNECT_FAILED hop2");
+  EXPECT_STREQ(lines[1], "release-assets.githubusercontent.com");
+  EXPECT_STREQ(lines[2], "heap 41234/18432");
+  const std::string longWord(100, 'w');
+  ASSERT_EQ(ota_diagnostics::wrap(longWord.c_str(), lines, 1), 1u);
+  EXPECT_EQ(strlen(lines[0]), ota_diagnostics::WRAP_LINE_CHARS);
+  std::string many;
+  for (int i = 0; i < 40; i++) many += "word ";
+  EXPECT_EQ(ota_diagnostics::wrap(many.c_str(), lines, ota_diagnostics::WRAP_MAX_LINES), ota_diagnostics::WRAP_MAX_LINES);
+  for (const auto& line : lines) EXPECT_LE(strlen(line), ota_diagnostics::WRAP_LINE_CHARS);
+  EXPECT_EQ(ota_diagnostics::wrap("", lines, ota_diagnostics::WRAP_MAX_LINES), 0u);
+}
