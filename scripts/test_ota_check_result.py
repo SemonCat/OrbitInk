@@ -16,6 +16,7 @@ class CheckResult(unittest.TestCase):
 #define LOG_ERR(...)
 #define LOG_DBG(...)
 enum { STR_CANCEL, STR_UPDATE, STR_OTA_DOWNGRADE };
+int sequence = 0;
 const char* tr(int id) { return id == STR_OTA_DOWNGRADE ? "downgrade" : "update"; }
 struct OtaUpdater {
   enum Error { OK, NO_UPDATE, HTTP_ERROR, JSON_PARSE_ERROR, UPDATE_OLDER_ERROR,
@@ -25,7 +26,8 @@ struct OtaUpdater {
   bool downgrade = false;
   bool isChannelDowngrade() { return downgrade; }
   int checks = 0;
-  Error checkForUpdate() { ++checks; return result; }
+  int checkedAt = 0;
+  Error checkForUpdate() { ++checks; checkedAt = ++sequence; return result; }
   bool isUpdateNewer() { return newer; }
 };
 struct OtaUpdateActivity {
@@ -43,6 +45,9 @@ struct OtaUpdateActivity {
   void finish() { finished = true; }
   void requestUpdateAndWait() {}
   void runUpdateInstall() { assert(false); }
+  int releasedAt = 0;
+  void releaseFontCachesBeforeTls() { releasedAt = ++sequence; }
+  void enterFailed() { state = FAILED; }
   void onWifiSelectionComplete(bool);
 };
 struct RenderLock { explicit RenderLock(OtaUpdateActivity&) {} };
@@ -56,6 +61,8 @@ int main() {
       activity.updater.newer = newer;
       activity.onWifiSelectionComplete(true);
       assert(activity.updater.checks == 1);
+      // The rebuildable SD-font arena is dropped before the manifest TLS handshake.
+      assert(activity.releasedAt > 0 && activity.releasedAt < activity.updater.checkedAt);
       if (result == OtaUpdater::NO_UPDATE || (result == OtaUpdater::OK && !newer))
         assert(activity.state == OtaUpdateActivity::NO_UPDATE && !activity.confirmPopup.shown);
       else if (result == OtaUpdater::OK)
