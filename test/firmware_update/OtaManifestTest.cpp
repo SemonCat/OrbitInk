@@ -7,6 +7,7 @@
 #include "lib/FirmwareUpdate/OtaManifest.h"
 #include "lib/FirmwareUpdate/OtaPublicKey.h"
 #include "lib/FirmwareUpdate/OtaSignature.h"
+#include "lib/FirmwareUpdate/OtaDiagnostics.h"
 #include "src/network/OtaChannel.h"
 
 using ota_manifest::Manifest;
@@ -245,4 +246,30 @@ TEST(OtaChannel, NightlyDisplayIsExactlyNightlyWithoutTouchingSignedIdentity) {
   EXPECT_STREQ(ota_channel::IDENTITY, "CrossFade-OTA/" CROSSFADE_OTA_CHANNEL "/x3-zh-TW/build=" CROSSFADE_OTA_STR(
                                           CROSSFADE_OTA_BUILD));
   EXPECT_STREQ(ota_channel::NIGHTLY, "orbitink-x3-nightly");
+}
+
+TEST(OtaDiagnostics, FailureSummaryNamesPhaseErrorHopHostAndHeap) {
+  ota_diagnostics::Record none;
+  EXPECT_EQ(ota_diagnostics::summary(none), "");
+  ota_diagnostics::Record r;
+  r.phase = ota_diagnostics::Phase::DOWNLOAD;
+  r.error = "CONNECT_FAILED";
+  r.hop = 2;
+  r.setHost("release-assets.githubusercontent.com");
+  r.freeHeap = 41234;
+  r.maxAlloc = 18432;
+  EXPECT_EQ(ota_diagnostics::summary(r),
+            "DOWNLOAD CONNECT_FAILED hop2 release-assets.githubusercontent.com heap 41234/18432");
+  r.detail = "IO";
+  r.httpStatus = 200;
+  r.bytesDone = 1048576;
+  r.bytesTotal = 5918176;
+  const std::string report = ota_diagnostics::report(r, ota_channel::IDENTITY, "1.3.3");
+  EXPECT_NE(report.find("Summary: DOWNLOAD CONNECT_FAILED/IO HTTP 200 hop2"), std::string::npos);
+  EXPECT_NE(report.find("Bytes: 1048576/5918176"), std::string::npos);
+  EXPECT_NE(report.find("Largest free block: 18432"), std::string::npos);
+  EXPECT_NE(report.find(ota_channel::IDENTITY), std::string::npos);
+  r.setHost(std::string(200, 'h').c_str());  // bounded
+  EXPECT_EQ(std::string(r.host).size(), sizeof(r.host) - 1);
+  EXPECT_STREQ(ota_diagnostics::phaseName(ota_diagnostics::Phase::MANIFEST_POLICY), "MANIFEST_POLICY");
 }

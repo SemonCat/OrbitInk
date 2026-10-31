@@ -1,7 +1,10 @@
 #include "OtaUpdateActivity.h"
 
+#include <FontCacheManager.h>
 #include <GfxRenderer.h>
+#include <HalStorage.h>
 #include <I18n.h>
+#include <Logging.h>
 #include <WiFi.h>
 
 #include "MappedInputManager.h"
@@ -20,7 +23,30 @@ constexpr char CURRENT_BUILD_SUFFIX[] = " (build " CROSSFADE_OTA_STR(CROSSFADE_O
 #else
 constexpr char CURRENT_BUILD_SUFFIX[] = "";
 #endif
+constexpr char OTA_REPORT_PATH[] = "/ota_report.txt";
 }  // namespace
+
+void OtaUpdateActivity::releaseFontCachesBeforeTls() const {
+  // The TLS handshake needs one large contiguous block. The status screens above render through the
+  // SD CJK font, whose retained page arena is rebuildable; drop it first, as every other TLS client
+  // (KOReader/BookOrbit sync) already does.
+  if (auto* fcm = renderer.getFontCacheManager()) fcm->forceReleaseTransientCaches();
+}
+
+void OtaUpdateActivity::enterFailed() {
+  const auto& failure = updater.getLastFailure();
+  failureDetail = ota_diagnostics::summary(failure);
+  if (failure.failed()) {
+    LOG_ERR("OTA", "Update failed: %s", failureDetail.c_str());
+    const std::string text = ota_diagnostics::report(failure, ota_channel::IDENTITY, CROSSPOINT_VERSION);
+    if (!Storage.writeFile(OTA_REPORT_PATH, String(text.c_str()))) LOG_ERR("OTA", "Could not write %s", OTA_REPORT_PATH);
+  }
+  {
+    RenderLock lock(*this);
+    state = FAILED;
+  }
+  requestUpdate();
+}
 
 void OtaUpdateActivity::onWifiSelectionComplete(const bool success) {
   if (!success) {
@@ -37,13 +63,11 @@ void OtaUpdateActivity::onWifiSelectionComplete(const bool success) {
   }
   requestUpdateAndWait();
 
+  releaseFontCachesBeforeTls();
   const auto res = updater.checkForUpdate();
   if (res != OtaUpdater::OK && res != OtaUpdater::NO_UPDATE) {
     LOG_DBG("OTA", "Update check failed: %d", res);
-    {
-      RenderLock lock(*this);
-      state = FAILED;
-    }
+    enterFailed();
     return;
   }
 
@@ -164,6 +188,17 @@ void OtaUpdateActivity::render(RenderLock&&) {
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   } else if (state == FAILED) {
     renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_UPDATE_FAILED), true, EpdFontFamily::BOLD);
+    if (!failureDetail.empty()) {
+      int y = top + height + metrics.verticalSpacing;
+      const auto smallHeight = renderer.getLineHeight(SMALL_FONT_ID);
+      const auto lines =
+          renderer.wrappedText(SMALL_FONT_ID, failureDetail.c_str(), pageWidth - metrics.contentSidePadding * 2, 4);
+      for (const auto& line : lines) {
+        renderer.drawCenteredText(SMALL_FONT_ID, y, line.c_str());
+        y += smallHeight;
+      }
+      renderer.drawCenteredText(SMALL_FONT_ID, y + metrics.verticalSpacing, OTA_REPORT_PATH);
+    }
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   } else if (state == FINISHED) {
@@ -181,6 +216,7 @@ void OtaUpdateActivity::runUpdateInstall() {
     state = UPDATE_IN_PROGRESS;
   }
   requestUpdateAndWait();
+  releaseFontCachesBeforeTls();
   const auto res = updater.installUpdate(
       [](void* ctx) {
         // immediate=true notifies the render task directly. The default deferred path only
@@ -192,11 +228,7 @@ void OtaUpdateActivity::runUpdateInstall() {
 
   if (res != OtaUpdater::OK) {
     LOG_DBG("OTA", "Update failed: %d", res);
-    {
-      RenderLock lock(*this);
-      state = FAILED;
-    }
-    requestUpdate();
+    enterFailed();
     return;
   }
 

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <OtaDiagnostics.h>
+
 #include <cstddef>
 #include <cstdint>
 
@@ -47,7 +49,9 @@ using DataFn = bool (*)(const uint8_t* data, size_t len, void* ctx);
 
 // `userAgent` must be a stable literal (ota_channel::IDENTITY). Returns the final HTTP status in
 // `lastStatus` when the request reached a server.
+// On failure, `diag` (when given) receives the failing hop, its host and the heap state; the
+// caller sets phase/error.
 Result get(const char* url, const char* userAgent, size_t maxBytes, size_t expectedLength, DataFn onData, void* ctx,
-           int* lastStatus = nullptr);
+           int* lastStatus = nullptr, ota_diagnostics::Record* diag = nullptr);
 
 }  // namespace ota_fetch

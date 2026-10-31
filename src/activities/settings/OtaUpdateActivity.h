@@ -29,8 +29,14 @@ class OtaUpdateActivity : public Activity {
   // them) match the rest of the firmware instead of this activity's own bespoke touch-zone layout.
   OptionPopup confirmPopup;
 
+  // ota_diagnostics::summary() of the failure, shown under "update failed" and written with the full
+  // record to OTA_REPORT_PATH so the user can read the phase/error code back to us.
+  std::string failureDetail;
+
   void onWifiSelectionComplete(bool success);
   void runUpdateInstall();
+  void enterFailed();
+  void releaseFontCachesBeforeTls() const;
 
  public:
   explicit OtaUpdateActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)

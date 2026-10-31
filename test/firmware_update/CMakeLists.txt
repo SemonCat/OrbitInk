@@ -48,4 +48,6 @@ target_link_libraries(FirmwareUpdateTest PRIVATE
   GTest::gtest_main
 )
 
+target_compile_definitions(FirmwareUpdateTest PRIVATE OTA_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+
 gtest_discover_tests(FirmwareUpdateTest)

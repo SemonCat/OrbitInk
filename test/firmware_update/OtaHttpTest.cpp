@@ -1,5 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <fstream>
+#include <iterator>
 #include <string>
 
 #include "lib/FirmwareUpdate/OtaHttp.h"
@@ -165,4 +168,29 @@ TEST(OtaHttp, LegacyRepositoryRenameKeepsSignedFirmwareUrlAndBoundedRedirectsUsa
                                       asset));
   EXPECT_TRUE(ota_http::isAllowedHost(asset.host));
   // This is parser/allowlist evidence, not proof of a future live GitHub rename.
+}
+
+// Recorded GitHub release-download 302 (HTTP/1.1, 2026-10-31) with the signed token, cookies and
+// request id replaced by same-length filler: the 3,994-byte Content-Security-Policy line and the
+// 913-byte Location line are what the device actually parses on every OTA hop.
+TEST(OtaHttp, RecordedGithubReleaseRedirectHeadParsesWithinDeviceLimits) {
+  std::ifstream f(std::string(OTA_TEST_DATA_DIR) + "/github_302_head.txt", std::ios::binary);
+  const std::string head{std::istreambuf_iterator<char>(f), {}};
+  ASSERT_GT(head.size(), 5000u);
+  for (const size_t slice : {size_t{512}, size_t{1}, size_t{4096}}) {  // device reads 512-byte slices
+    ota_http::ResponseHeadParser parser;
+    size_t off = 0;
+    while (off < head.size() && parser.status() == ota_http::ResponseHeadParser::Status::NEED_MORE) {
+      const size_t n = std::min(slice, head.size() - off);
+      off += parser.feed(reinterpret_cast<const uint8_t*>(head.data()) + off, n);
+    }
+    ASSERT_EQ(parser.status(), ota_http::ResponseHeadParser::Status::DONE) << slice;
+    EXPECT_EQ(parser.statusCode(), 302);
+    ota_http::Url current{};
+    ASSERT_TRUE(ota_http::parseHttpsUrl("https://github.com/SemonCat/OrbitInk/releases/download/b/f.bin", current));
+    ota_http::Url next{};
+    ASSERT_TRUE(ota_http::resolveRedirect(current, parser.location(), next));
+    EXPECT_STREQ(next.host, "release-assets.githubusercontent.com");
+    EXPECT_TRUE(ota_http::isAllowedHost(next.host));
+  }
 }

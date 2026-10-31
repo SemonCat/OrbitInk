@@ -76,8 +76,14 @@ const char* resultName(const Result r) {
   return "?";
 }
 
-Result get(const char* urlText, const char* userAgent, const size_t maxBytes, const size_t expectedLength,
-           const DataFn onData, void* ctx, int* lastStatus) {
+namespace {
+struct HopState {
+  int hop = -1;
+  char host[sizeof(ota_diagnostics::Record::host)] = {};  // copied: the Url is freed on return
+};
+
+Result getImpl(const char* urlText, const char* userAgent, const size_t maxBytes, const size_t expectedLength,
+               const DataFn onData, void* ctx, int* lastStatus, HopState& at) {
   if (lastStatus) *lastStatus = 0;
   auto url = makeUniqueNoThrow<ota_http::Url>();
   auto next = makeUniqueNoThrow<ota_http::Url>();
@@ -89,11 +95,14 @@ Result get(const char* urlText, const char* userAgent, const size_t maxBytes, co
   if (!ota_http::parseHttpsUrl(urlText, *url)) return Result::BAD_URL;
 
   for (int hop = 0; hop <= MAX_REDIRECTS; ++hop) {
+    at.hop = hop;
+    snprintf(at.host, sizeof(at.host), "%s", url->host);
     if (!ota_http::isAllowedHost(url->host)) {
       LOG_ERR("OTAF", "host not allowed: %s", url->host);
       return Result::HOST_NOT_ALLOWED;
     }
-    LOG_INF("OTAF", "GET https://%s (hop %d, free heap %u)", url->host, hop, static_cast<unsigned>(ESP.getFreeHeap()));
+    LOG_INF("OTAF", "GET https://%s (hop %d, free heap %u, largest block %u)", url->host, hop,
+            static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMaxAllocHeap()));
 
     auto client = makeUniqueNoThrow<freeink::SecureClient>();
     auto head = makeUniqueNoThrow<ota_http::ResponseHeadParser>();
@@ -209,6 +218,22 @@ Result get(const char* urlText, const char* userAgent, const size_t maxBytes, co
     return Result::OK;
   }
   return Result::TOO_MANY_REDIRECTS;
+}
+}  // namespace
+
+Result get(const char* urlText, const char* userAgent, const size_t maxBytes, const size_t expectedLength,
+           const DataFn onData, void* ctx, int* lastStatus, ota_diagnostics::Record* diag) {
+  HopState at;
+  const Result result = getImpl(urlText, userAgent, maxBytes, expectedLength, onData, ctx, lastStatus, at);
+  if (result != Result::OK && diag) {
+    // Sampled after the failing hop's client and parser are gone: what the next attempt would see.
+    diag->hop = at.hop;
+    diag->setHost(at.host);
+    diag->httpStatus = lastStatus ? *lastStatus : 0;
+    diag->freeHeap = ESP.getFreeHeap();
+    diag->maxAlloc = ESP.getMaxAllocHeap();
+  }
+  return result;
 }
 
 }  // namespace ota_fetch

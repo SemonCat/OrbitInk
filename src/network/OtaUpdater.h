@@ -1,5 +1,7 @@
 #pragma once
 
+#include <OtaDiagnostics.h>
+
 #include <cstdint>
 #include <string>
 
@@ -15,6 +17,7 @@ class OtaUpdater {
   uint8_t checkedChannel = 0;
   bool channelDowngrade = false;
   uint8_t customSha[32] = {};
+  ota_diagnostics::Record lastFailure;
 
  public:
   using ProgressCallback = void (*)(void* ctx);
@@ -56,6 +59,8 @@ class OtaUpdater {
 
   OtaUpdater() = default;
   bool isChannelDowngrade() const { return channelDowngrade; }
+  // Phase/error of the last failed custom-channel check or install (empty when none failed).
+  const ota_diagnostics::Record& getLastFailure() const { return lastFailure; }
   bool isUpdateNewer() const;
   const std::string& getLatestVersion() const;
   OtaUpdaterError checkForUpdate();

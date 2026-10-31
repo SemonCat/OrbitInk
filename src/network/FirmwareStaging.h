@@ -39,6 +39,16 @@ uint16_t deviceChipId();
 // browser are re-checked immediately before the on-device confirmation. Uses the shared validator,
 // not firmware_flash::validateImageFile, so the simulator runs the same check.
 enum class Recheck : uint8_t { OK, OPEN_FAIL, CHANGED, INVALID, OOM };
+inline const char* recheckName(const Recheck r) {
+  switch (r) {
+    case Recheck::OK: return "OK";
+    case Recheck::OPEN_FAIL: return "RECHECK_OPEN_FAIL";
+    case Recheck::CHANGED: return "RECHECK_CHANGED";
+    case Recheck::INVALID: return "RECHECK_INVALID";
+    case Recheck::OOM: return "RECHECK_OOM";
+  }
+  return "?";
+}
 Recheck recheckStaged(size_t size, const uint8_t sha[32]);
 
 }  // namespace firmware_staging

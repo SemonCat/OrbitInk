@@ -243,7 +243,20 @@ bool writeFirmware(const uint8_t* data, const size_t len, void* ctx) {
 }
 }  // namespace
 
+namespace {
+void fail(ota_diagnostics::Record& r, const ota_diagnostics::Phase phase, const char* error, const char* detail = "") {
+  r.phase = phase;
+  r.error = error ? error : "";
+  r.detail = detail ? detail : "";
+  if (r.freeHeap == 0) {
+    r.freeHeap = ESP.getFreeHeap();
+    r.maxAlloc = ESP.getMaxAllocHeap();
+  }
+}
+}  // namespace
+
 OtaUpdater::OtaUpdaterError OtaUpdater::checkCustomChannel() {
+  lastFailure = ota_diagnostics::Record{};
   updateAvailable = false;
   channelDowngrade = false;
   checkedChannel = ota_channel::normalizeSelection(SETTINGS.otaChannel);
@@ -257,15 +270,21 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkCustomChannel() {
   auto manifest = makeUniqueNoThrow<ota_manifest::Manifest>();
   if (!body || !manifest) {
     LOG_ERR("OTA", "OOM: manifest buffers");
+    fail(lastFailure, ota_diagnostics::Phase::MANIFEST_FETCH, "OOM");
     return OOM_ERROR;
   }
   int status = 0;
   const auto fetched = ota_fetch::get(ota_channel::manifestUrl(checkedChannel), ota_channel::IDENTITY,
-                                      sizeof(body->data), 0, &appendManifest, body.get(), &status);
+                                      sizeof(body->data), 0, &appendManifest, body.get(), &status, &lastFailure);
   if (fetched != ota_fetch::Result::OK) {
     LOG_ERR("OTA", "Manifest fetch failed: %s (HTTP %d)", ota_fetch::resultName(fetched), status);
     // A channel with no published release yet answers 404: that is "no update", not a failure.
-    return (fetched == ota_fetch::Result::HTTP_STATUS && status == 404) ? NO_UPDATE : HTTP_ERROR;
+    if (fetched == ota_fetch::Result::HTTP_STATUS && status == 404) {
+      lastFailure = ota_diagnostics::Record{};
+      return NO_UPDATE;
+    }
+    fail(lastFailure, ota_diagnostics::Phase::MANIFEST_FETCH, ota_fetch::resultName(fetched));
+    return HTTP_ERROR;
   }
 
   auto result = ota_manifest::parse(body->data, body->len, *manifest);
@@ -274,6 +293,7 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkCustomChannel() {
   }
   if (result != ota_manifest::Result::OK) {
     LOG_ERR("OTA", "Manifest rejected: %s", ota_manifest::resultName(result));
+    fail(lastFailure, ota_diagnostics::Phase::MANIFEST_VERIFY, ota_manifest::resultName(result));
     return result == ota_manifest::Result::BAD_SIGNATURE ? VERIFY_ERROR : JSON_PARSE_ERROR;
   }
   const ota_manifest::Policy policy{ota_channel::selectedChannel(checkedChannel),
@@ -291,6 +311,7 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkCustomChannel() {
   }
   if (result != ota_manifest::Result::OK) {
     LOG_ERR("OTA", "Manifest policy: %s", ota_manifest::resultName(result));
+    fail(lastFailure, ota_diagnostics::Phase::MANIFEST_POLICY, ota_manifest::resultName(result));
     return VERIFY_ERROR;
   }
 
@@ -314,11 +335,15 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkCustomChannel() {
 }
 
 OtaUpdater::OtaUpdaterError OtaUpdater::installCustom(ProgressCallback onProgress, void* ctx) {
+  lastFailure = ota_diagnostics::Record{};
+  lastFailure.bytesTotal = static_cast<uint32_t>(otaSize);
   firmware_staging::HalStorageSink sink;
   const size_t limit = firmware_staging::partitionLimit();
   firmware_upload::Session session(sink, limit, firmware_staging::deviceChipId());
   if (limit == 0 || !session.begin(otaSize, customSha, otaSize)) {
     LOG_ERR("OTA", "Cannot stage download: %s", firmware_upload::errorName(session.lastError()));
+    fail(lastFailure, ota_diagnostics::Phase::STAGE_BEGIN,
+         limit == 0 ? "NO_PARTITION" : firmware_upload::errorName(session.lastError()));
     return session.lastError() == firmware_upload::Error::OOM ? OOM_ERROR : INTERNAL_UPDATE_ERROR;
   }
 
@@ -328,12 +353,15 @@ OtaUpdater::OtaUpdaterError OtaUpdater::installCustom(ProgressCallback onProgres
   DownloadCtx dl{&session, &processedSize, otaSize, onProgress, ctx, -1};
   int status = 0;
   const auto fetched =
-      ota_fetch::get(otaUrl.c_str(), ota_channel::IDENTITY, otaSize, otaSize, &writeFirmware, &dl, &status);
+      ota_fetch::get(otaUrl.c_str(), ota_channel::IDENTITY, otaSize, otaSize, &writeFirmware, &dl, &status, &lastFailure);
   esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
 
   if (fetched != ota_fetch::Result::OK) {
     LOG_ERR("OTA", "Firmware download failed: %s (HTTP %d, session %s)", ota_fetch::resultName(fetched), status,
             firmware_upload::errorName(session.lastError()));
+    lastFailure.bytesDone = static_cast<uint32_t>(processedSize);
+    fail(lastFailure, ota_diagnostics::Phase::DOWNLOAD, ota_fetch::resultName(fetched),
+         session.lastError() == firmware_upload::Error::NONE ? "" : firmware_upload::errorName(session.lastError()));
     const bool rejected = session.state() == firmware_upload::State::IDLE &&
                           session.lastError() != firmware_upload::Error::NONE &&
                           session.lastError() != firmware_upload::Error::IO;
@@ -343,12 +371,17 @@ OtaUpdater::OtaUpdaterError OtaUpdater::installCustom(ProgressCallback onProgres
   if (!session.end()) {
     LOG_ERR("OTA", "Downloaded firmware rejected: %s (%s)", firmware_upload::errorName(session.lastError()),
             esp_image::statusName(session.imageStatus()));
+    lastFailure.bytesDone = static_cast<uint32_t>(processedSize);
+    fail(lastFailure, ota_diagnostics::Phase::STAGE_VERIFY, firmware_upload::errorName(session.lastError()),
+         esp_image::statusName(session.imageStatus()));
     return session.lastError() == firmware_upload::Error::IO ? INTERNAL_UPDATE_ERROR : VERIFY_ERROR;
   }
 
   // Re-read the removable card against the signed identity immediately before flashing.
-  if (firmware_staging::recheckStaged(otaSize, customSha) != firmware_staging::Recheck::OK) {
+  if (const auto recheck = firmware_staging::recheckStaged(otaSize, customSha); recheck != firmware_staging::Recheck::OK) {
     session.discard();
+    lastFailure.bytesDone = static_cast<uint32_t>(processedSize);
+    fail(lastFailure, ota_diagnostics::Phase::STAGE_VERIFY, firmware_staging::recheckName(recheck));
     return VERIFY_ERROR;
   }
   // FirmwareFlasher additionally re-validates the ESP image before writing the inactive slot.
@@ -358,6 +391,8 @@ OtaUpdater::OtaUpdaterError OtaUpdater::installCustom(ProgressCallback onProgres
   session.commitApplied();
   if (flashResult != firmware_flash::Result::OK) {
     LOG_ERR("OTA", "Install failed: %s", firmware_flash::resultName(flashResult));
+    lastFailure.bytesDone = static_cast<uint32_t>(processedSize);
+    fail(lastFailure, ota_diagnostics::Phase::FLASH, firmware_flash::resultName(flashResult));
     return INTERNAL_UPDATE_ERROR;
   }
   LOG_INF("OTA", "Custom update to build %u completed", static_cast<unsigned>(customBuild));
