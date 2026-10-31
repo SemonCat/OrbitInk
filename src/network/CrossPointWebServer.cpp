@@ -589,7 +589,7 @@ namespace {
 bool sendChunkFully(WebServer& server, const char* data, const size_t length) {
   char head[12];
   const int headLength = snprintf(head, sizeof(head), "%x\r\n", static_cast<unsigned>(length));
-  NetworkClient& client = server.client();
+  auto&& client = server.client();  // a reference on device; the simulator returns a handle by value
   if (headLength <= 0 || client.write(reinterpret_cast<const uint8_t*>(head), headLength) != static_cast<size_t>(headLength) ||
       client.write(reinterpret_cast<const uint8_t*>(data), length) != length ||
       client.write(reinterpret_cast<const uint8_t*>("\r\n"), 2) != 2) {
