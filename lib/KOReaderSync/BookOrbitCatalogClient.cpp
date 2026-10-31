@@ -284,6 +284,11 @@ BookOrbitCatalogClient::Session::~Session() {
   if (transport_) transport_->end();
 }
 
+bool BookOrbitCatalogClient::Session::heapTooLowForRequest() {
+  if (prepareHeap_) prepareHeap_(prepareHeapContext_);
+  return KOSyncRequest::insufficientHeap();
+}
+
 BookOrbitCatalogClient::Error BookOrbitCatalogClient::Session::fetchRootSections(std::vector<Section>& out,
                                                                                  const AbortCallback& shouldAbort) {
   out.clear();
@@ -292,7 +297,7 @@ BookOrbitCatalogClient::Error BookOrbitCatalogClient::Session::fetchRootSections
 
   const std::string url = BOOKORBIT_STORE.getBaseUrl() + "/plugin/catalog/root";
   LOG_DBG("BOCatalog", "Fetching root sections: %s (heap: %u)", url.c_str(), (unsigned)ESP.getFreeHeap());
-  if (KOSyncRequest::insufficientHeap()) return LOW_MEMORY;
+  if (heapTooLowForRequest()) return LOW_MEMORY;
 
   if (!transport_->begin(url)) {
     LOG_ERR("BOCatalog", "Bad URL: %s", url.c_str());
@@ -358,7 +363,7 @@ BookOrbitCatalogClient::Error BookOrbitCatalogClient::Session::fetchBooks(const 
                                                                   {"sort", query.sort},
                                                                   {"readStatus", query.readStatus}});
   LOG_DBG("BOCatalog", "Fetching books: %s (heap: %u)", url.c_str(), (unsigned)ESP.getFreeHeap());
-  if (KOSyncRequest::insufficientHeap()) return LOW_MEMORY;
+  if (heapTooLowForRequest()) return LOW_MEMORY;
 
   if (!transport_->begin(url)) {
     LOG_ERR("BOCatalog", "Bad URL: %s", url.c_str());
@@ -438,7 +443,7 @@ BookOrbitCatalogClient::Error BookOrbitCatalogClient::Session::fetchSectionEntri
   const std::string url =
       buildQueryUrl("/plugin/catalog/sections/" + encodeQueryValue(sectionId), {{"page", pageBuf}, {"size", sizeBuf}});
   LOG_DBG("BOCatalog", "Fetching section entries: %s (heap: %u)", url.c_str(), (unsigned)ESP.getFreeHeap());
-  if (KOSyncRequest::insufficientHeap()) return LOW_MEMORY;
+  if (heapTooLowForRequest()) return LOW_MEMORY;
 
   if (!transport_->begin(url)) {
     LOG_ERR("BOCatalog", "Bad URL: %s", url.c_str());
@@ -503,7 +508,7 @@ BookOrbitCatalogClient::Error BookOrbitCatalogClient::Session::fetchBookDetail(c
   // override keyed on this value).
   const std::string url = buildQueryUrl("/plugin/catalog/books/" + encodeQueryValue(bookId), {{"deviceId", deviceId}});
   LOG_DBG("BOCatalog", "Fetching book detail: %s (heap: %u)", url.c_str(), (unsigned)ESP.getFreeHeap());
-  if (KOSyncRequest::insufficientHeap()) return LOW_MEMORY;
+  if (heapTooLowForRequest()) return LOW_MEMORY;
 
   if (!transport_->begin(url)) {
     LOG_ERR("BOCatalog", "Bad URL: %s", url.c_str());
@@ -590,7 +595,7 @@ BookOrbitCatalogClient::Error BookOrbitCatalogClient::Session::setReadStatus(con
   const std::string url =
       BOOKORBIT_STORE.getBaseUrl() + "/plugin/catalog/books/" + encodeQueryValue(bookId) + "/read-status";
   LOG_DBG("BOCatalog", "Setting read status: %s (heap: %u)", url.c_str(), (unsigned)ESP.getFreeHeap());
-  if (KOSyncRequest::insufficientHeap()) return LOW_MEMORY;
+  if (heapTooLowForRequest()) return LOW_MEMORY;
 
   JsonDocument doc;
   doc["status"] = status;
@@ -645,7 +650,7 @@ BookOrbitCatalogClient::Error BookOrbitCatalogClient::Session::setRating(const s
   const std::string url =
       BOOKORBIT_STORE.getBaseUrl() + "/plugin/catalog/books/" + encodeQueryValue(bookId) + "/rating";
   LOG_DBG("BOCatalog", "Setting rating: %s (heap: %u)", url.c_str(), (unsigned)ESP.getFreeHeap());
-  if (KOSyncRequest::insufficientHeap()) return LOW_MEMORY;
+  if (heapTooLowForRequest()) return LOW_MEMORY;
 
   JsonDocument doc;
   if (rating < 0) {
@@ -707,7 +712,7 @@ BookOrbitCatalogClient::Error BookOrbitCatalogClient::Session::downloadFile(cons
       BOOKORBIT_STORE.getBaseUrl() + "/plugin/catalog/files/" + encodeQueryValue(fileId) + "/download";
   LOG_DBG("BOCatalog", "Downloading file: %s -> %s (heap: %u)", url.c_str(), destPath.c_str(),
           (unsigned)ESP.getFreeHeap());
-  if (KOSyncRequest::insufficientHeap()) return LOW_MEMORY;
+  if (heapTooLowForRequest()) return LOW_MEMORY;
 
   const std::string tmpPath = destPath + ".tmp";
   const std::string bakPath = destPath + ".bak";

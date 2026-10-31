@@ -991,3 +991,158 @@ TEST_F(BookOrbitCatalogClientTest, DownloadFileWithoutAFileFetcherFailsClosedRat
 }
 
 }  // namespace
+
+// ---- Heap preparation before the TLS gate --------------------------------------------------------
+// The browser frees the SD-font page arena it just rendered with right before each request's heap
+// gate. These run every catalog operation with the fake heap BELOW KOSyncRequest's gate
+// (35000 free / 20000 largest block) and a hook that frees memory, so a hook that ran after the
+// gate (or not at all) would surface as LOW_MEMORY.
+namespace {
+struct HeapPressure {
+  uint32_t freeAfter = 60000;
+  uint32_t blockAfter = 30000;
+  int calls = 0;
+  size_t requestsAtCall = 0;  // transport requests already sent when the hook ran
+  FakeKOSyncTransport* fake = nullptr;
+  static void release(void* context) {
+    auto* self = static_cast<HeapPressure*>(context);
+    self->calls++;
+    self->requestsAtCall = self->fake ? self->fake->requests.size() : 0;
+    ESP.freeHeap = self->freeAfter;
+    ESP.maxAllocHeap = self->blockAfter;
+  }
+};
+
+void squeezeHeap() {
+  ESP.freeHeap = 30000;       // < MIN_FREE_FOR_TLS
+  ESP.maxAllocHeap = 19000;   // < MIN_BLOCK_FOR_TLS
+}
+
+// One call of each operation against a session holding exactly one scripted success response.
+enum class Op { Root, Books, Facets, Detail, ReadStatus, Rating, Download };
+const Op ALL_OPS[] = {Op::Root, Op::Books, Op::Facets, Op::Detail, Op::ReadStatus, Op::Rating, Op::Download};
+
+const char* opName(Op op) {
+  switch (op) {
+    case Op::Root: return "root";
+    case Op::Books: return "books";
+    case Op::Facets: return "facets";
+    case Op::Detail: return "detail";
+    case Op::ReadStatus: return "read-status";
+    case Op::Rating: return "rating";
+    case Op::Download: return "download";
+  }
+  return "?";
+}
+
+FakeKOSyncTransport::ScriptedResponse responseFor(Op op) {
+  switch (op) {
+    case Op::Root: return {200, R"({"sections":[{"id":"recent","title":"Recent"}]})"};
+    case Op::Books: return {200, R"({"items":[{"id":"b1","title":"Dune"}],"hasNext":false})"};
+    case Op::Facets: return {200, R"({"hasNext":false,"items":[{"id":"a1","title":"Herbert","count":1}]})"};
+    case Op::Detail: return {200, R"({"id":"7","title":"Dune","files":[]})"};
+    case Op::ReadStatus: return {200, R"({"readStatus":"reading"})"};
+    case Op::Rating: return {200, R"({"rating":3})"};
+    case Op::Download: return {200, ""};
+  }
+  return {500, ""};
+}
+
+Client::Error runOp(Op op, Client::Session& session) {
+  switch (op) {
+    case Op::Root: { std::vector<Client::Section> out; return session.fetchRootSections(out); }
+    case Op::Books: { Client::BookQuery q; Client::BookPage out; return session.fetchBooks(q, out); }
+    case Op::Facets: { Client::FacetPage out; return session.fetchSectionEntries("authors", 0, out); }
+    case Op::Detail: { Client::BookDetail out; return session.fetchBookDetail("7", "dev1", out); }
+    case Op::ReadStatus: { std::string out; return session.setReadStatus("b1", "reading", out); }
+    case Op::Rating: { int out = -1; return session.setRating("b1", 3, out); }
+    case Op::Download: return session.downloadFile("f1", "/Books/dune.epub");
+  }
+  return Client::BAD_REQUEST;
+}
+
+std::unique_ptr<Client::Session> makeOpSession(Op op, ScriptedFetch& fetch, FakeKOSyncTransport** outFake) {
+  auto* fake = new FakeKOSyncTransport({responseFor(op)});
+  *outFake = fake;
+  if (op == Op::Download) {
+    return std::make_unique<Client::Session>(std::unique_ptr<KOSyncTransport>(fake), std::ref(fetch));
+  }
+  return std::make_unique<Client::Session>(std::unique_ptr<KOSyncTransport>(fake));
+}
+}  // namespace
+
+TEST_F(BookOrbitCatalogClientTest, EveryOperationReleasesHeapBeforeTheTlsGate) {
+  for (const Op op : ALL_OPS) {
+    SCOPED_TRACE(opName(op));
+    testStorage().reset();
+    ScriptedFetch fetch;
+    HeapPressure pressure;
+    auto session = makeOpSession(op, fetch, &pressure.fake);
+    session->setPrepareHeap(&HeapPressure::release, &pressure);
+    squeezeHeap();
+    EXPECT_EQ(runOp(op, *session), Client::OK);
+    EXPECT_EQ(pressure.calls, 1);
+    EXPECT_EQ(pressure.requestsAtCall, 0u);  // ran before anything went on the wire
+  }
+}
+
+TEST_F(BookOrbitCatalogClientTest, WithoutHeapPreparationThePressuredGateStillRefusesEveryOperation) {
+  for (const Op op : ALL_OPS) {
+    SCOPED_TRACE(opName(op));
+    ScriptedFetch fetch;
+    FakeKOSyncTransport* fake = nullptr;
+    auto session = makeOpSession(op, fetch, &fake);
+    squeezeHeap();
+    EXPECT_EQ(runOp(op, *session), Client::LOW_MEMORY);
+    EXPECT_TRUE(fake->requests.empty());
+    EXPECT_EQ(fetch.calls, 0);
+  }
+}
+
+TEST_F(BookOrbitCatalogClientTest, HeapPreparationThatFreesTooLittleKeepsTheGateClosed) {
+  // The hook is a release attempt, not a bypass: if it cannot lift both figures over the gate, the
+  // request is still refused before any TLS work -- free heap alone is not enough without a block.
+  for (const Op op : ALL_OPS) {
+    SCOPED_TRACE(opName(op));
+    ScriptedFetch fetch;
+    HeapPressure pressure;
+    pressure.freeAfter = 80000;
+    pressure.blockAfter = 19999;
+    auto session = makeOpSession(op, fetch, &pressure.fake);
+    session->setPrepareHeap(&HeapPressure::release, &pressure);
+    squeezeHeap();
+    EXPECT_EQ(runOp(op, *session), Client::LOW_MEMORY);
+    EXPECT_EQ(pressure.calls, 1);
+    EXPECT_TRUE(pressure.fake->requests.empty());
+    EXPECT_EQ(fetch.calls, 0);
+  }
+}
+
+TEST_F(BookOrbitCatalogClientTest, HeapPreparationRunsAgainForEveryRequestOnAReusedSession) {
+  // The browser keeps one keep-alive session across screens, and every status render in between can
+  // rebuild a page arena: each request must release again, not only the first.
+  HeapPressure pressure;
+  auto session = makeJsonSession({responseFor(Op::Root), responseFor(Op::Books), responseFor(Op::Root)},
+                                 &pressure.fake);
+  session->setPrepareHeap(&HeapPressure::release, &pressure);
+  for (int round = 0; round < 3; ++round) {
+    squeezeHeap();  // the previous screen's render
+    const Op op = round == 1 ? Op::Books : Op::Root;
+    ScriptedFetch unused;
+    EXPECT_EQ(runOp(op, *session), Client::OK) << round;
+    EXPECT_EQ(pressure.calls, round + 1);
+    EXPECT_EQ(pressure.requestsAtCall, static_cast<size_t>(round));
+  }
+}
+
+TEST_F(BookOrbitCatalogClientTest, RequestsRejectedBeforeTheGateDoNotRunHeapPreparation) {
+  HeapPressure pressure;
+  auto session = makeJsonSession({}, &pressure.fake);
+  session->setPrepareHeap(&HeapPressure::release, &pressure);
+  std::string out;
+  EXPECT_EQ(session->setReadStatus("b1", "not-a-status", out), Client::BAD_REQUEST);
+  BOOKORBIT_STORE.setTestCredentials(false);
+  std::vector<Client::Section> sections;
+  EXPECT_EQ(session->fetchRootSections(sections), Client::NO_CREDENTIALS);
+  EXPECT_EQ(pressure.calls, 0);
+}

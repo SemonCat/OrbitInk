@@ -124,6 +124,9 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   void enterOffline();
   void retryNetworkIfLinkUp();
   BookOrbitCatalogClient::Session& catalogSession();
+  // Session::PrepareHeapFn for every catalog request: drops the rebuildable SD-font page arenas
+  // the status screen rendered with, under the RenderLock, right before the TLS heap gate.
+  static void prepareCatalogHeap(void* activity);
   void loadRoot();
   void loadBooks(int page);
   void loadFacets(int page);

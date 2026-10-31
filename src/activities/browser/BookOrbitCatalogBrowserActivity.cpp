@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <BookOrbitCredentialStore.h>
 #include <CalendarTime.h>
+#include <FontCacheManager.h>
 #include <GfxRenderer.h>
 #include <HalClock.h>
 #include <HalGPIO.h>
@@ -559,11 +560,27 @@ void BookOrbitCatalogBrowserActivity::reportSessionError(const BOClient::Error e
   requestUpdate();
 }
 
+void BookOrbitCatalogBrowserActivity::prepareCatalogHeap(void* activity) {
+  // Every catalog screen renders through the SD CJK UI font, whose page arena (and the reader's,
+  // if the library was opened from a book) stays resident after the render. KOSyncRequest's TLS
+  // gate needs a 20 KB contiguous block, so measure it with that rebuildable arena dropped, as the
+  // sync and OTA clients do. The RenderLock waits out a render the status update above may have
+  // started (requestUpdate(true) notifies the render task immediately) and keeps the next one from
+  // starting until the release is done, so no glyph pointer is freed under an in-flight draw.
+  auto* self = static_cast<BookOrbitCatalogBrowserActivity*>(activity);
+  RenderLock lock;
+  if (auto* fcm = self->renderer.getFontCacheManager()) fcm->forceReleaseTransientCaches();
+}
+
 BOClient::Session& BookOrbitCatalogBrowserActivity::catalogSession() {
   // The full configured base URL is a conservative trust scope: repeated catalog paths on that
   // server retain SecureHttpClient's keep-alive connection, while any settings change destroys
   // the old transport before reuse.
-  return *catalogSessionCache.get(BOOKORBIT_STORE.getBaseUrl(), [] { return std::make_unique<BOClient::Session>(); });
+  return *catalogSessionCache.get(BOOKORBIT_STORE.getBaseUrl(), [this] {
+    auto session = std::make_unique<BOClient::Session>();
+    session->setPrepareHeap(&BookOrbitCatalogBrowserActivity::prepareCatalogHeap, this);
+    return session;
+  });
 }
 
 void BookOrbitCatalogBrowserActivity::retryNetworkIfLinkUp() {
@@ -998,6 +1015,7 @@ void BookOrbitCatalogBrowserActivity::downloadFile(const int fileIndex) {
   BOClient::Error result = BOClient::OK;
   {
     BOClient::Session session;
+    session.setPrepareHeap(&BookOrbitCatalogBrowserActivity::prepareCatalogHeap, this);
     result = session.downloadFile(
         file.id, dest,
         [this, &lastRenderedPercent, &lastProgressUpdateMs](const size_t done, const size_t total) {

@@ -193,6 +193,17 @@ class BookOrbitCatalogClient {
     Session(const Session&) = delete;
     Session& operator=(const Session&) = delete;
 
+    // Called synchronously right before each request's TLS heap gate (every network method,
+    // including downloadFile()). The caller frees memory it can rebuild -- on device, the SD font
+    // page arenas the status screen just rendered with -- so the gate measures the heap the
+    // handshake will actually get. Not called for requests rejected before the gate (missing
+    // credentials, bad arguments). The gate itself and its thresholds are unchanged.
+    using PrepareHeapFn = void (*)(void* context);
+    void setPrepareHeap(PrepareHeapFn fn, void* context) {
+      prepareHeap_ = fn;
+      prepareHeapContext_ = context;
+    }
+
     /** GET .../plugin/catalog/root -- the server's advertised top-level browsing entry points. */
     Error fetchRootSections(std::vector<Section>& out, const AbortCallback& shouldAbort = nullptr);
 
@@ -259,8 +270,13 @@ class BookOrbitCatalogClient {
     int lastHttpCode() const { return lastHttpCode_; }
 
    private:
+    // prepareHeap_ then KOSyncRequest::insufficientHeap(): true means LOW_MEMORY.
+    bool heapTooLowForRequest();
+
     std::unique_ptr<KOSyncTransport> transport_;
     FileFetcher fileFetcher_;
+    PrepareHeapFn prepareHeap_ = nullptr;
+    void* prepareHeapContext_ = nullptr;
     int lastHttpCode_ = 0;
   };
 };
