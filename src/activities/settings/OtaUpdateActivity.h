@@ -31,7 +31,7 @@ class OtaUpdateActivity : public Activity {
 
   // ota_diagnostics::summary() of the failure, shown under "update failed" and written with the full
   // record to OTA_REPORT_PATH so the user can read the phase/error code back to us.
-  std::string failureDetail;
+  char failureDetail[ota_diagnostics::SUMMARY_MAX] = {};
 
   void onWifiSelectionComplete(bool success);
   void runUpdateInstall();

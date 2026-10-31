@@ -35,11 +35,17 @@ void OtaUpdateActivity::releaseFontCachesBeforeTls() const {
 
 void OtaUpdateActivity::enterFailed() {
   const auto& failure = updater.getLastFailure();
-  failureDetail = ota_diagnostics::summary(failure);
+  ota_diagnostics::summary(failure, failureDetail, sizeof(failureDetail));
   if (failure.failed()) {
-    LOG_ERR("OTA", "Update failed: %s", failureDetail.c_str());
-    const std::string text = ota_diagnostics::report(failure, ota_channel::IDENTITY, CROSSPOINT_VERSION);
-    if (!Storage.writeFile(OTA_REPORT_PATH, String(text.c_str()))) LOG_ERR("OTA", "Could not write %s", OTA_REPORT_PATH);
+    LOG_ERR("OTA", "Update failed: %s", failureDetail);
+    // Stack buffer + HalFile: no heap string on a path that can follow an OOM failure.
+    char text[ota_diagnostics::REPORT_MAX];
+    const size_t len = ota_diagnostics::report(failure, ota_channel::IDENTITY, CROSSPOINT_VERSION, text, sizeof(text));
+    auto file = Storage.open(OTA_REPORT_PATH, O_WRITE | O_CREAT | O_TRUNC);
+    if (!file || file.write(reinterpret_cast<const uint8_t*>(text), len) != len) {
+      LOG_ERR("OTA", "Could not write %s", OTA_REPORT_PATH);
+    }
+    if (file) file.close();
   }
   {
     RenderLock lock(*this);
@@ -188,11 +194,11 @@ void OtaUpdateActivity::render(RenderLock&&) {
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   } else if (state == FAILED) {
     renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_UPDATE_FAILED), true, EpdFontFamily::BOLD);
-    if (!failureDetail.empty()) {
+    if (failureDetail[0] != '\0') {
       int y = top + height + metrics.verticalSpacing;
       const auto smallHeight = renderer.getLineHeight(SMALL_FONT_ID);
       const auto lines =
-          renderer.wrappedText(SMALL_FONT_ID, failureDetail.c_str(), pageWidth - metrics.contentSidePadding * 2, 4);
+          renderer.wrappedText(SMALL_FONT_ID, failureDetail, pageWidth - metrics.contentSidePadding * 2, 4);
       for (const auto& line : lines) {
         renderer.drawCenteredText(SMALL_FONT_ID, y, line.c_str());
         y += smallHeight;

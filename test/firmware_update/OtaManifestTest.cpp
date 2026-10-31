@@ -249,8 +249,10 @@ TEST(OtaChannel, NightlyDisplayIsExactlyNightlyWithoutTouchingSignedIdentity) {
 }
 
 TEST(OtaDiagnostics, FailureSummaryNamesPhaseErrorHopHostAndHeap) {
+  char line[ota_diagnostics::SUMMARY_MAX];
   ota_diagnostics::Record none;
-  EXPECT_EQ(ota_diagnostics::summary(none), "");
+  ota_diagnostics::summary(none, line, sizeof(line));
+  EXPECT_STREQ(line, "");
   ota_diagnostics::Record r;
   r.phase = ota_diagnostics::Phase::DOWNLOAD;
   r.error = "CONNECT_FAILED";
@@ -258,18 +260,26 @@ TEST(OtaDiagnostics, FailureSummaryNamesPhaseErrorHopHostAndHeap) {
   r.setHost("release-assets.githubusercontent.com");
   r.freeHeap = 41234;
   r.maxAlloc = 18432;
-  EXPECT_EQ(ota_diagnostics::summary(r),
-            "DOWNLOAD CONNECT_FAILED hop2 release-assets.githubusercontent.com heap 41234/18432");
+  ota_diagnostics::summary(r, line, sizeof(line));
+  EXPECT_STREQ(line, "DOWNLOAD CONNECT_FAILED hop2 release-assets.githubusercontent.com heap 41234/18432");
   r.detail = "IO";
   r.httpStatus = 200;
   r.bytesDone = 1048576;
   r.bytesTotal = 5918176;
-  const std::string report = ota_diagnostics::report(r, ota_channel::IDENTITY, "1.3.3");
+  char text[ota_diagnostics::REPORT_MAX];
+  const size_t len = ota_diagnostics::report(r, ota_channel::IDENTITY, "1.3.3", text, sizeof(text));
+  const std::string report(text, len);
+  EXPECT_EQ(len, strlen(text));
   EXPECT_NE(report.find("Summary: DOWNLOAD CONNECT_FAILED/IO HTTP 200 hop2"), std::string::npos);
   EXPECT_NE(report.find("Bytes: 1048576/5918176"), std::string::npos);
   EXPECT_NE(report.find("Largest free block: 18432"), std::string::npos);
   EXPECT_NE(report.find(ota_channel::IDENTITY), std::string::npos);
-  r.setHost(std::string(200, 'h').c_str());  // bounded
+  // Bounded everywhere: long host, tiny buffers.
+  r.setHost(std::string(200, 'h').c_str());
   EXPECT_EQ(std::string(r.host).size(), sizeof(r.host) - 1);
+  char tiny[8];
+  ota_diagnostics::summary(r, tiny, sizeof(tiny));
+  EXPECT_EQ(strlen(tiny), sizeof(tiny) - 1);
+  EXPECT_EQ(ota_diagnostics::report(r, "", "", tiny, sizeof(tiny)), sizeof(tiny) - 1);
   EXPECT_STREQ(ota_diagnostics::phaseName(ota_diagnostics::Phase::MANIFEST_POLICY), "MANIFEST_POLICY");
 }

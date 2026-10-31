@@ -96,6 +96,7 @@ Result getImpl(const char* urlText, const char* userAgent, const size_t maxBytes
 
   for (int hop = 0; hop <= MAX_REDIRECTS; ++hop) {
     at.hop = hop;
+    if (lastStatus) *lastStatus = 0;  // a later hop's connect failure must not report an earlier 302
     snprintf(at.host, sizeof(at.host), "%s", url->host);
     if (!ota_http::isAllowedHost(url->host)) {
       LOG_ERR("OTAF", "host not allowed: %s", url->host);

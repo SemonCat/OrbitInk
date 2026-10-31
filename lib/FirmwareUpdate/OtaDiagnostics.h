@@ -1,8 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 #include <cstdio>
-#include <string>
 
 // Why the last custom-channel OTA attempt failed, in terms a user can read back to us.
 // Pure data + formatting (host-tested in test/firmware_update). The device fills it in
@@ -54,38 +54,46 @@ struct Record {
   }
 };
 
+// Formatting writes into caller-owned buffers: this runs right after OOM failures, and on the
+// -fno-exceptions device a failed std::string allocation would abort instead of reporting.
+constexpr size_t SUMMARY_MAX = 160;
+constexpr size_t REPORT_MAX = 512;
+
 // One short ASCII line for the e-paper failure screen, e.g.
 // "DOWNLOAD CONNECT_FAILED hop1 release-assets.githubusercontent.com heap 41234/18432".
-inline std::string summary(const Record& r) {
-  if (!r.failed()) return "";
-  char buf[160];
-  int n = snprintf(buf, sizeof(buf), "%s %s", phaseName(r.phase), r.error);
-  if (n > 0 && static_cast<size_t>(n) < sizeof(buf) && r.detail[0] != '\0') {
-    n += snprintf(buf + n, sizeof(buf) - n, "/%s", r.detail);
-  }
-  if (n > 0 && static_cast<size_t>(n) < sizeof(buf) && r.httpStatus > 0) {
-    n += snprintf(buf + n, sizeof(buf) - n, " HTTP %d", r.httpStatus);
-  }
-  if (n > 0 && static_cast<size_t>(n) < sizeof(buf) && r.hop >= 0) {
-    n += snprintf(buf + n, sizeof(buf) - n, " hop%d %s", r.hop, r.host);
-  }
-  if (n > 0 && static_cast<size_t>(n) < sizeof(buf) && r.freeHeap > 0) {
-    snprintf(buf + n, sizeof(buf) - n, " heap %u/%u", static_cast<unsigned>(r.freeHeap),
-             static_cast<unsigned>(r.maxAlloc));
-  }
-  return buf;
+// Empty when nothing failed. Always NUL-terminated within `cap`.
+inline void summary(const Record& r, char* out, const size_t cap) {
+  if (!out || cap == 0) return;
+  out[0] = '\0';
+  if (!r.failed()) return;
+  size_t n = 0;
+  const auto append = [&](const char* fmt, auto... args) {
+    if (n >= cap) return;
+    const int w = snprintf(out + n, cap - n, fmt, args...);
+    if (w > 0) n += static_cast<size_t>(w);
+  };
+  append("%s %s", phaseName(r.phase), r.error);
+  if (r.detail[0] != '\0') append("/%s", r.detail);
+  if (r.httpStatus > 0) append(" HTTP %d", r.httpStatus);
+  if (r.hop >= 0) append(" hop%d %s", r.hop, r.host);
+  if (r.freeHeap > 0) append(" heap %u/%u", static_cast<unsigned>(r.freeHeap), static_cast<unsigned>(r.maxAlloc));
 }
 
 // Multi-line text for /ota_report.txt; `identity` is the running image's OTA identity literal.
-inline std::string report(const Record& r, const char* identity, const char* version) {
-  char buf[512];
-  snprintf(buf, sizeof(buf),
-           "OrbitInk OTA failure\nRunning: %s (%s)\nSummary: %s\nPhase: %s\nError: %s\nDetail: %s\n"
-           "HTTP status: %d\nHop: %d\nHost: %s\nBytes: %u/%u\nFree heap: %u\nLargest free block: %u\n",
-           identity ? identity : "", version ? version : "", summary(r).c_str(), phaseName(r.phase), r.error,
-           r.detail, r.httpStatus, r.hop, r.host, static_cast<unsigned>(r.bytesDone),
-           static_cast<unsigned>(r.bytesTotal), static_cast<unsigned>(r.freeHeap), static_cast<unsigned>(r.maxAlloc));
-  return buf;
+// Returns the length written (always < cap).
+inline size_t report(const Record& r, const char* identity, const char* version, char* out, const size_t cap) {
+  if (!out || cap == 0) return 0;
+  char line[SUMMARY_MAX];
+  summary(r, line, sizeof(line));
+  const int w = snprintf(out, cap,
+                         "OrbitInk OTA failure\nRunning: %s (%s)\nSummary: %s\nPhase: %s\nError: %s\nDetail: %s\n"
+                         "HTTP status: %d\nHop: %d\nHost: %s\nBytes: %u/%u\nFree heap: %u\nLargest free block: %u\n",
+                         identity ? identity : "", version ? version : "", line, phaseName(r.phase), r.error, r.detail,
+                         r.httpStatus, r.hop, r.host, static_cast<unsigned>(r.bytesDone),
+                         static_cast<unsigned>(r.bytesTotal), static_cast<unsigned>(r.freeHeap),
+                         static_cast<unsigned>(r.maxAlloc));
+  if (w < 0) return 0;
+  return static_cast<size_t>(w) < cap ? static_cast<size_t>(w) : cap - 1;
 }
 
 }  // namespace ota_diagnostics
