@@ -12,6 +12,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
+#include <cstring>
 
 #include "BookOrbitCredentialStore.h"
 #include "CrossPointSettings.h"
@@ -579,6 +581,25 @@ void CrossPointWebServer::handleFileList() const {
   sendHtmlContent(server.get(), FilesPageHtml, sizeof(FilesPageHtml));
 }
 
+namespace {
+// One HTTP/1.1 chunk on the current response, framed exactly as WebServer::sendContent() frames it
+// (hex length CRLF, data, CRLF). Unlike sendContent() it reports a short write: NetworkClient::write
+// returns short after its ~10 s of select retries against a peer that stopped reading, and only a
+// hard socket error disconnects, so connected() alone keeps reporting true for a stalled browser.
+bool sendChunkFully(WebServer& server, const char* data, const size_t length) {
+  char head[12];
+  const int headLength = snprintf(head, sizeof(head), "%x\r\n", static_cast<unsigned>(length));
+  NetworkClient& client = server.client();
+  if (headLength <= 0 || client.write(reinterpret_cast<const uint8_t*>(head), headLength) != static_cast<size_t>(headLength) ||
+      client.write(reinterpret_cast<const uint8_t*>(data), length) != length ||
+      client.write(reinterpret_cast<const uint8_t*>("\r\n"), 2) != 2) {
+    client.stop();
+    return false;
+  }
+  return true;
+}
+}  // namespace
+
 void CrossPointWebServer::handleFileListData() const {
   // Get current path from query string (default to root)
   String currentPath = "/";
@@ -616,19 +637,26 @@ void CrossPointWebServer::handleFileListData() const {
       return true;
     }
 
+    // Separator and entry in one chunk. A short or failed write (a stalled browser runs a write into
+    // NetworkClient's ~10 s retry budget) ends the response: every further entry would block again.
+    const char* chunk = output;
+    char withComma[sizeof(output) + 1];
+    size_t chunkLength = written;
     if (seenFirst) {
-      server->sendContent(",");
+      withComma[0] = ',';
+      memcpy(withComma + 1, output, written);
+      chunk = withComma;
+      chunkLength = written + 1;
     } else {
       seenFirst = true;
     }
-    server->sendContent(output);
-    // A failed or timed-out write stops the client: every further entry would block another ~10 s.
-    if (!server->client().connected()) {
-      LOG_ERR("WEB", "File list client disconnected mid-listing; stopping");
+    if (!sendChunkFully(*server, chunk, chunkLength)) {
+      LOG_ERR("WEB", "File list client stalled or disconnected mid-listing; stopping");
       return false;
     }
     return true;
   });
+  if (!server->client().connected()) return;  // ended mid-listing: no trailer for a dead client
   server->sendContent("]");
   // End of streamed response, empty chunk to signal client
   server->sendContent("");

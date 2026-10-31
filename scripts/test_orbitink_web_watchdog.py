@@ -25,8 +25,13 @@ class WebServerWatchdog(unittest.TestCase):
         self.assertIn("if (!callback(info))", text)
         listing = text[text.index("void CrossPointWebServer::handleFileListData()"):]
         listing = listing[:listing.index("\n}\n")]
-        self.assertIn("if (!server->client().connected())", listing)
-        self.assertIn("return false;", listing)
+        # Every entry goes through a write that reports short (timed-out) writes, and stops the scan.
+        self.assertIn("if (!sendChunkFully(*server, chunk, chunkLength))", listing)
+        self.assertNotIn("server->sendContent(output)", listing)
+        helper = text[text.index("bool sendChunkFully(WebServer& server"):]
+        helper = helper[:helper.index("\n}\n")]
+        self.assertEqual(helper.count("!= static_cast<size_t>(headLength)") + helper.count("!= length") + helper.count("!= 2"), 3)
+        self.assertIn("client.stop();", helper)
 
 
 if __name__ == "__main__":
