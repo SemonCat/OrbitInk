@@ -28,6 +28,7 @@ def render(svg_path):
     stored = convert_icon.load_image(str(svg_path), SIZE, SIZE)
     header = convert_icon.image_to_c_array(stored, "Logo120")
     header = header.replace("// size: 120x120\n", HEADER_COMMENT, 1)
+    header = "".join(line.rstrip() + "\n" for line in header.splitlines())
     threshold = convert_icon.threshold
     preview = stored.convert("L").point(lambda v: 255 if v >= threshold else 0).rotate(-90, expand=True)
     return header, preview
