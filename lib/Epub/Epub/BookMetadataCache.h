@@ -5,7 +5,6 @@
 
 #include <algorithm>
 #include <array>
-#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -79,14 +78,18 @@ class BookMetadataCache {
   // wrapper serves whichever pass is active (spine, then toc).
   std::unique_ptr<serialization::BufferedFileWriter> passOut;
 
-  // Index for fast href→spineIndex lookup (used only for large EPUBs)
+  // Sorted href->spineIndex lookup, adapted from CrossPoint ddadc36 (#4095). Exists only during a
+  // large EPUB's TOC pass: a std::deque member keeps its 8-pointer map and one 512 B node for every
+  // open book even when empty or cleared. One nothrow allocation instead of deque growth, because
+  // with -fno-exceptions a failed node allocation inside resize() aborts; on failure the TOC pass
+  // falls back to the linear spine scan, which yields the same spine indices.
   struct SpineHrefIndexEntry {
     uint64_t hrefHash;  // FNV-1a 64-bit hash
     uint16_t hrefLen;   // length for collision reduction
     int16_t spineIndex;
   };
-  std::deque<SpineHrefIndexEntry> spineHrefIndex;
-  bool useSpineHrefIndex = false;
+  std::unique_ptr<SpineHrefIndexEntry[]> spineHrefIndex;
+  uint16_t spineHrefIndexCount = 0;
 
   static constexpr uint16_t LARGE_SPINE_THRESHOLD = 400;
 

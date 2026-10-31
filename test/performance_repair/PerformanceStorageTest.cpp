@@ -5,8 +5,11 @@
 #include <ZipFile.h>
 
 #include <algorithm>
+#include <cstdlib>
+#include <new>
 #include <numeric>
 #include <random>
+#include <set>
 #include <thread>
 
 #include "BoundedFileList.h"
@@ -422,3 +425,144 @@ TEST_F(StorageRepair, LinkResolutionUsesContiguousSpinePayloadAndKeepsFallbackBe
   EXPECT_EQ(cache.resolveSpineHref("absent.xhtml"), -1);
 }
 }  // namespace
+
+// --- Large-spine TOC pass: transient href index (adapted from CrossPoint ddadc36, #4095) ---
+// Tracks (and can fail) nothrow array allocations of exactly the index size, so the tests can see
+// the index exist only during the TOC pass and force the linear-scan fallback.
+namespace {
+size_t trackedArrayBytes = 0;
+bool failTrackedArray = false;
+size_t trackedArrayAllocs = 0;
+std::set<void*> liveTrackedArrays;
+}  // namespace
+
+void* operator new[](std::size_t size, const std::nothrow_t&) noexcept {
+  if (trackedArrayBytes && size == trackedArrayBytes) {
+    if (failTrackedArray) return nullptr;
+    void* p = std::malloc(size);
+    if (p) {
+      trackedArrayAllocs++;
+      liveTrackedArrays.insert(p);
+    }
+    return p;
+  }
+  return std::malloc(size ? size : 1);
+}
+void operator delete[](void* p) noexcept {
+  liveTrackedArrays.erase(p);
+  std::free(p);
+}
+void operator delete[](void* p, std::size_t) noexcept {
+  liveTrackedArrays.erase(p);
+  std::free(p);
+}
+
+namespace {
+constexpr int LARGE_SPINE = 450;  // above BookMetadataCache::LARGE_SPINE_THRESHOLD (400)
+
+// Manifest/spine order 0..449; the NCX lists chapters in reverse and adds one unknown href.
+std::vector<uint8_t> largeSpineEpub() {
+  std::string manifest, spine, nav;
+  for (int i = 0; i < LARGE_SPINE; ++i) {
+    const auto n = std::to_string(i);
+    manifest += "<item id=\"c" + n + "\" href=\"ch" + n + ".xhtml\" media-type=\"application/xhtml+xml\"/>";
+    spine += "<itemref idref=\"c" + n + "\"/>";
+  }
+  int order = 0;
+  for (int i = LARGE_SPINE - 1; i >= 0; --i) {
+    const auto n = std::to_string(i);
+    nav += "<navPoint id=\"n" + n + "\" playOrder=\"" + std::to_string(++order) + "\"><navLabel><text>Chapter " + n +
+           "</text></navLabel><content src=\"ch" + n + ".xhtml\"/></navPoint>";
+  }
+  nav += "<navPoint id=\"missing\" playOrder=\"999\"><navLabel><text>Missing</text></navLabel>"
+         "<content src=\"nowhere.xhtml\"/></navPoint>";
+  std::vector<std::pair<std::string, std::string>> files = {
+      {"META-INF/container.xml", "<container><rootfiles><rootfile full-path=\"content.opf\" "
+                                "media-type=\"application/oebps-package+xml\"/></rootfiles></container>"},
+      {"content.opf", "<package xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><metadata><dc:title>Long</dc:title>"
+                      "</metadata><manifest><item id=\"ncx\" href=\"toc.ncx\" media-type=\"application/x-dtbncx+xml\"/>" +
+                          manifest + "</manifest><spine toc=\"ncx\">" + spine + "</spine></package>"},
+      {"toc.ncx", "<ncx><navMap>" + nav + "</navMap></ncx>"}};
+  for (int i = 0; i < LARGE_SPINE; ++i) files.push_back({"ch" + std::to_string(i) + ".xhtml", "<html><body>x</body></html>"});
+  return zip(files);
+}
+
+// TOC entry index -> spine index stored in book.bin after (re)opening; -1 = unresolved href
+// (getSpineIndexForTocIndex() would clamp that to 0 for the reader).
+std::vector<int> tocSpineIndices(Epub& book) {
+  std::vector<int> out;
+  for (int t = 0; t < book.getTocItemsCount(); ++t) out.push_back(book.getTocItem(t).spineIndex);
+  return out;
+}
+
+std::vector<int> expectedLargeSpineToc() {
+  std::vector<int> out;
+  for (int i = LARGE_SPINE - 1; i >= 0; --i) out.push_back(i);
+  out.push_back(-1);
+  return out;
+}
+
+struct TrackIndexAllocations {
+  explicit TrackIndexAllocations(bool fail) {
+    trackedArrayBytes = LARGE_SPINE * 16;  // sizeof(SpineHrefIndexEntry): u64 hash + u16 + i16, 8-aligned
+    failTrackedArray = fail;
+    trackedArrayAllocs = 0;
+    liveTrackedArrays.clear();
+  }
+  ~TrackIndexAllocations() { trackedArrayBytes = 0; failTrackedArray = false; }
+};
+}  // namespace
+
+TEST_F(StorageRepair, LargeSpineTocResolvesThroughTransientIndexThenFreesIt) {
+  HalStorage::registerTestFile("/long.epub", largeSpineEpub());
+  {
+    TrackIndexAllocations track(false);
+    Epub book("/long.epub", "/cache");
+    ASSERT_TRUE(book.load(true, true));
+    ASSERT_EQ(book.getSpineItemsCount(), LARGE_SPINE);
+    EXPECT_EQ(tocSpineIndices(book), expectedLargeSpineToc());
+    EXPECT_EQ(trackedArrayAllocs, 1u);          // built once, for the TOC pass
+    EXPECT_TRUE(liveTrackedArrays.empty());     // and released before the book stays open
+  }
+  // Reopen from the cached book.bin: same mapping, no index rebuilt.
+  TrackIndexAllocations track(false);
+  Epub reopened("/long.epub", "/cache");
+  ASSERT_TRUE(reopened.load(true, true));
+  EXPECT_EQ(tocSpineIndices(reopened), expectedLargeSpineToc());
+  EXPECT_EQ(trackedArrayAllocs, 0u);
+}
+
+TEST_F(StorageRepair, LargeSpineIndexAllocationFailureFallsBackToTheSameTocMapping) {
+  HalStorage::registerTestFile("/long.epub", largeSpineEpub());
+  TrackIndexAllocations track(/*fail=*/true);
+  Epub book("/long.epub", "/cache");
+  ASSERT_TRUE(book.load(true, true));  // no abort, no failed build
+  EXPECT_EQ(tocSpineIndices(book), expectedLargeSpineToc());
+  EXPECT_EQ(trackedArrayAllocs, 0u);
+  Epub reopened("/long.epub", "/cache");
+  ASSERT_TRUE(reopened.load(true, true));
+  EXPECT_EQ(tocSpineIndices(reopened), expectedLargeSpineToc());
+}
+
+TEST_F(StorageRepair, SmallSpineBuildsNoIndexAndReusedCacheDropsAStaleOne) {
+  BookMetadataCache cache("/cache");
+  auto build = [&cache](int count) {
+    std::vector<int> out;
+    EXPECT_TRUE(cache.beginWrite());
+    EXPECT_TRUE(cache.beginContentOpfPass());
+    for (int i = 0; i < count; ++i) cache.createSpineEntry("s" + std::to_string(i) + ".xhtml");
+    EXPECT_TRUE(cache.endContentOpfPass());
+    EXPECT_TRUE(cache.beginTocPass());
+    cache.createTocEntry("first", "s0.xhtml", "", 1);
+    cache.createTocEntry("last", "s" + std::to_string(count - 1) + ".xhtml", "", 1);
+    EXPECT_TRUE(cache.endTocPass());
+  };
+  TrackIndexAllocations track(false);
+  build(LARGE_SPINE);
+  EXPECT_EQ(trackedArrayAllocs, 1u);
+  EXPECT_TRUE(liveTrackedArrays.empty());
+  trackedArrayAllocs = 0;
+  build(3);  // below the threshold: linear scan, no index of any size
+  EXPECT_EQ(trackedArrayAllocs, 0u);
+  EXPECT_TRUE(liveTrackedArrays.empty());
+}

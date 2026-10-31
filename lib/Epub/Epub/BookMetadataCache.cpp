@@ -121,27 +121,32 @@ bool BookMetadataCache::beginTocPass() {
     return false;
   }
 
+  spineHrefIndex.reset();
+  spineHrefIndexCount = 0;
   if (spineCount >= LARGE_SPINE_THRESHOLD) {
-    spineHrefIndex.clear();
-    spineHrefIndex.resize(spineCount);
+    spineHrefIndex = makeUniqueNoThrow<SpineHrefIndexEntry[]>(spineCount);
+    if (!spineHrefIndex) {
+      // createTocEntry then scans the spine file for every TOC entry: slower, same results.
+      LOG_ERR("BMC", "Failed to allocate %u B spine href index; scanning %u spine items per TOC entry",
+              static_cast<unsigned>(spineCount * sizeof(SpineHrefIndexEntry)), static_cast<unsigned>(spineCount));
+    }
+  }
+  if (spineHrefIndex) {
     spineFile.seek(0);
-    for (int i = 0; i < spineCount; i++) {
+    for (uint16_t i = 0; i < spineCount; i++) {
       auto entry = readSpineEntry(spineFile);
-      SpineHrefIndexEntry idx;
+      SpineHrefIndexEntry& idx = spineHrefIndex[i];
       idx.hrefHash = fnvHash64(entry.href);
       idx.hrefLen = static_cast<uint16_t>(entry.href.size());
       idx.spineIndex = static_cast<int16_t>(i);
-      spineHrefIndex[i] = idx;
     }
-    std::sort(spineHrefIndex.begin(), spineHrefIndex.end(),
+    spineHrefIndexCount = spineCount;
+    std::sort(spineHrefIndex.get(), spineHrefIndex.get() + spineHrefIndexCount,
               [](const SpineHrefIndexEntry& a, const SpineHrefIndexEntry& b) {
                 return a.hrefHash < b.hrefHash || (a.hrefHash == b.hrefHash && a.hrefLen < b.hrefLen);
               });
     spineFile.seek(0);
-    useSpineHrefIndex = true;
     LOG_DBG("BMC", "Using fast index for %d spine items", spineCount);
-  } else {
-    useSpineHrefIndex = false;
   }
 
   // Wrapper OOM is fine: createTocEntry falls back to unbuffered writes.
@@ -159,9 +164,8 @@ bool BookMetadataCache::endTocPass() {
   tocFile.close();
   spineFile.close();
 
-  spineHrefIndex.clear();
-  spineHrefIndex.shrink_to_fit();
-  useSpineHrefIndex = false;
+  spineHrefIndex.reset();
+  spineHrefIndexCount = 0;
 
   return flushed;
 }
@@ -428,17 +432,18 @@ void BookMetadataCache::createTocEntry(const std::string& title, const std::stri
 
   int16_t spineIndex = -1;
 
-  if (useSpineHrefIndex) {
+  if (spineHrefIndex) {
     uint64_t targetHash = fnvHash64(href);
     uint16_t targetLen = static_cast<uint16_t>(href.size());
+    const SpineHrefIndexEntry* const begin = spineHrefIndex.get();
+    const SpineHrefIndexEntry* const end = begin + spineHrefIndexCount;
 
-    auto it =
-        std::lower_bound(spineHrefIndex.begin(), spineHrefIndex.end(), SpineHrefIndexEntry{targetHash, targetLen, 0},
-                         [](const SpineHrefIndexEntry& a, const SpineHrefIndexEntry& b) {
-                           return a.hrefHash < b.hrefHash || (a.hrefHash == b.hrefHash && a.hrefLen < b.hrefLen);
-                         });
+    auto it = std::lower_bound(begin, end, SpineHrefIndexEntry{targetHash, targetLen, 0},
+                               [](const SpineHrefIndexEntry& a, const SpineHrefIndexEntry& b) {
+                                 return a.hrefHash < b.hrefHash || (a.hrefHash == b.hrefHash && a.hrefLen < b.hrefLen);
+                               });
 
-    while (it != spineHrefIndex.end() && it->hrefHash == targetHash && it->hrefLen == targetLen) {
+    while (it != end && it->hrefHash == targetHash && it->hrefLen == targetLen) {
       spineIndex = it->spineIndex;
       break;
     }
