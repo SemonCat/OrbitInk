@@ -31,6 +31,8 @@ def render(svg_path):
     header = convert_icon.image_to_c_array(stored, "Logo120")
     header = header.replace("// size: 120x120\n", HEADER_COMMENT, 1)
     header = "".join(line.rstrip() + "\n" for line in header.splitlines())
+    # Generated layout; --check and the test compare it byte for byte, so keep formatters off it.
+    header = header.replace("static const uint8_t", "// clang-format off\nstatic const uint8_t", 1) + "// clang-format on\n"
     threshold = convert_icon.threshold
     preview = stored.convert("L").point(lambda v: 255 if v >= threshold else 0).rotate(-90, expand=True)
     return header, preview
