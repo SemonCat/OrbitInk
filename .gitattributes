@@ -1,0 +1,2 @@
+# Recorded HTTP/1.1 response head: CRLF line endings are the wire bytes under test.
+test/firmware_update/github_302_head.txt -text -whitespace
