@@ -239,10 +239,10 @@ void BookOrbitCatalogBrowserActivity::renderLibrary() {
       const int x = 20 + (slot % 2) * 250, y = 205 + (slot / 2) * 168;
       if (selected) outline(renderer, x, y, 238, 157, 4);
       renderCover(book, x + 10, y + 9, 85, 135);
-      // Availability is outside noisy cover art, as are the title and status.
-      text(renderer, x + 10, y + 144, local ? tr(STR_BO_LOCAL_PREFIX) : tr(STR_BO_ONLINE), 14, 85);
       text(renderer, x + 105, y + 12, book.title, 22, 127, 3, true, true, 27);
-      text(renderer, x + 105, y + 96, book.authors, 17, 127, 2, false, true, 19);
+      // Keep availability in the metadata column, clear of the closed focus border.
+      text(renderer, x + 105, y + 96, book.authors, 17, 127);
+      text(renderer, x + 105, y + 115, local ? tr(STR_BO_LOCAL_PREFIX) : tr(STR_BO_ONLINE), 14, 127);
       text(renderer, x + 105, y + 137, status, 16, 127);
     }
   }

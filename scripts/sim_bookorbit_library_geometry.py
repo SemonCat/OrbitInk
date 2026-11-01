@@ -38,6 +38,10 @@ def assert_composition(path: Path, mode: str, count: int = 6, selected: int = 0)
             x, y = 20 + slot % 2 * 250, 205 + slot // 2 * 168
             outline(x + 10, y + 9, 85, 135)
             titlebox = (x + 105, y + 8, 127, 81)
+            assert any(ink(px, py) for py in range(y + 115, y + 129)
+                       for px in range(x + 105, x + 232)), "availability missing from metadata column"
+            assert not any(ink(px, py) for py in range(y + 145, y + 153)
+                           for px in range(x + 11, x + 94)), "availability clipped by focus border"
             if slot == selected:
                 outline(x, y, 238, 157, 4)
         elif mode == "titles":

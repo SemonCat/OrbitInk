@@ -22,7 +22,7 @@ the indexed local file. Reading never depends on a cover request.
 | Fixed tabs | All / Reading / Unread / Finished, x20 + 124*n, y107, 112 x 38 |
 | Sort/scope and view/tools rail | y161; full-width separator y193 |
 | Default covers | 2 columns x 3 rows; x20/270, y205/373/541; 238 x 157 selection |
-| Cover and metadata | 85 x 135 cover; title outside cover, up to 3 lines; author up to 2; status |
+| Cover and metadata | 85 x 135 cover; title outside cover, up to 3 lines; one author line, availability, status |
 | Title view | six rows; y201 + 80*n; 44 x 65 actual thumbnail or title fallback; title up to 2 lines |
 | Reading with cover view | two cards; y215/435; 488 x 203; 112 x 166 covers, progress and availability |
 | Shared footer | availability notice and exact range/total y701; rule y721; button instructions y738/770 |
@@ -38,6 +38,9 @@ the same resolved font/scale as rendering. The grid title uses a 22px scaled lin
 27px advance, author 17px with 19px advance, status 16px; title rows use 23px with 27px
 advance. These preserve the reference hierarchy/density despite the different typeface.
 BookOrbit's small bitmap Latin face and the real Khai Chinese face differ from mock Heiti.
+The grid reserves a separate metadata line for online/downloaded availability. Its author
+is one ellipsized line (full author in detail), keeping availability above the closed
+selection border and outside the cover art.
 
 ## X3 controls
 
