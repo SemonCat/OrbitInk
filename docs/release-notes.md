@@ -1,3 +1,3 @@
-<!-- source-sha256: 8a02c63b8592bc35ea4ce1b0fa431206c2758e9bf5d861ca6d1b56d7ca738cd3 -->
+<!-- source-sha256: f8881281173173332c3cfaefa9eedcd9d87620581ad162c74259ee6149b739cb -->
 
 - 統一手動與閒置休眠的畫面設定，讓選定的桌布或封面一致生效。
