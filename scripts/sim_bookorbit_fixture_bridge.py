@@ -15,8 +15,20 @@ Environment:
 catalog.json:
   {"root": [{"section": "all-books", "title": "..."}, ...],
    "books": [{"id": 101, "title": "...", "authors": ["..."], "progressPercentage": 12.5,
-              "files": [{"id": 1001, "format": "epub", "file": "a.epub"}]}]}
+              "readStatus": "reading", "seriesId": 7, "seriesName": "...", "seriesIndex": 2,
+              "libraryId": 1, "collectionIds": [3], "addedAt": "2026-01-02T00:00:00Z",
+              "lastReadAt": "...", "description": "...",
+              "files": [{"id": 1001, "format": "epub", "file": "a.epub"}]}],
+   "libraries": [{"id": 1, "name": "..."}], "collections": [{"id": 3, "name": "..."}]}
   sizeBytes and fileHash (KOReader partial MD5 of the file) are computed from the file.
+
+Modelled server behaviour (koreader-catalog.service.ts / opds-book.service.ts at the commit cited
+in lib/KOReaderSync/BookOrbitCatalogClient.h): books accept sort (6 values, natural order),
+q (title, author, series name), readStatus buckets, author, seriesId, libraryId, collectionId;
+sections/authors and sections/series page at 60 entries and ignore `size`; series entries carry
+id "series:<n>" plus a numeric seriesId; list/detail items carry the server's URL/date fields, and
+detail adds description, collections and relatedSections AFTER/AROUND files exactly as the server
+orders them, so client body caps are exercised with realistic bytes.
 
 State "faults" (set by the smoke script between runs):
   {"offline": true}          every request fails at the transport (status 0)
@@ -26,6 +38,7 @@ State "faults" (set by the smoke script between runs):
                              transport (status 0), then the fault clears itself
   {"offline_requests": 3}    the next 3 requests (any route) fail at the transport, then the
                              fault clears itself -- a network outage spanning several sync windows
+  {"delay_ms": 1500}         every answer is delayed (loading screens become observable)
 
 Page-stats responses follow BookOrbit's contract (results[{hash, accepted, duplicates}],
 unmatched[]); dedup key (deviceId, hash, page, startTime) mirrors the server's documented
@@ -102,6 +115,8 @@ def main() -> int:
             respond(status, payload, raw)
         return 0
 
+    if faults.get("delay_ms"):
+        time.sleep(int(faults["delay_ms"]) / 1000.0)
     if faults.get("offline"):
         return finish(0)
     if faults.get("offline_requests", 0) > 0:
@@ -126,9 +141,30 @@ def main() -> int:
                 "fileHash": partial_md5(fp), "durationSeconds": None,
                 "downloadUrl": f"{PREFIX}/plugin/catalog/files/{f['id']}/download", "devicePath": ""}
 
+    catalog_base = PREFIX + "/plugin/catalog"
+
     def list_item(b):
         return {"id": b["id"], "title": b["title"], "authors": b.get("authors", []),
-                "progressPercentage": b.get("progressPercentage"), "readStatus": b.get("readStatus")}
+                "seriesId": b.get("seriesId"), "seriesName": b.get("seriesName"),
+                "seriesIndex": b.get("seriesIndex"),
+                "progressPercentage": b.get("progressPercentage"), "lastReadAt": b.get("lastReadAt"),
+                "readStatus": b.get("readStatus"), "formats": ["epub"], "hasCover": True,
+                "thumbnailUrl": f"{catalog_base}/books/{b['id']}/thumbnail",
+                "detailUrl": f"{catalog_base}/books/{b['id']}",
+                "addedAt": b.get("addedAt", "2026-01-01T00:00:00.000Z"),
+                "updatedAt": b.get("addedAt", "2026-01-01T00:00:00.000Z")}
+
+    reading_bucket = ("reading", "rereading", "on_hold")
+    finished_bucket = ("read", "skimmed", "abandoned")
+
+    def bad_request(message):
+        return finish(400, {"message": message, "error": "Bad Request", "statusCode": 400})
+
+    def positive_int(name):
+        raw = (query.get(name) or [None])[0]
+        if raw is None:
+            return None, False
+        return (int(raw), False) if raw.isdigit() and int(raw) > 0 else (None, True)
 
     if method == "GET" and route == "/users/auth":
         return finish(200, {"authorized": "OK"})
@@ -136,23 +172,121 @@ def main() -> int:
         return finish(200, {"pluginVersion": "fixture", "serverVersion": "fixture", "capabilities": []})
     if method == "GET" and route == "/plugin/catalog/root":
         return finish(200, {"sections": catalog.get("root", [])})
+    if method == "GET" and route.startswith("/plugin/catalog/sections/"):
+        section = route.rsplit("/", 1)[1]
+        page = int((query.get("page") or ["1"])[0])
+        all_books = catalog.get("books", [])
+        if section == "authors":
+            counts = {}
+            for b in all_books:
+                for a in b.get("authors", []):
+                    counts[a] = counts.get(a, 0) + 1
+            rows = [{"id": a, "title": a, "section": "authors", "count": n,
+                     "booksHref": f"{catalog_base}/books?author={a}&sort=title"} for a, n in sorted(counts.items())]
+        elif section == "series":
+            series = {}
+            for b in all_books:
+                if b.get("seriesId"):
+                    series.setdefault(b["seriesId"], [b["seriesName"], 0])[1] += 1
+            rows = [{"id": f"series:{sid}", "title": name, "section": "series", "count": n, "seriesId": sid,
+                     "booksHref": f"{catalog_base}/books?seriesId={sid}&sort=series"}
+                    for sid, (name, n) in sorted(series.items(), key=lambda kv: kv[1][0])]
+        elif section in ("libraries", "collections"):
+            key = "libraries" if section == "libraries" else "collections"
+            rows = [{"id": str(e["id"]), "title": e["name"], "section": section,
+                     "booksHref": f"{catalog_base}/books?{'libraryId' if key == 'libraries' else 'collectionId'}={e['id']}"}
+                    for e in catalog.get(key, [])]
+            return finish(200, {"section": section, "items": rows})
+        elif section == "smart-scopes":
+            return finish(200, {"section": section, "items": []})
+        else:
+            return bad_request("Unknown catalog section")
+        chunk = rows[(page - 1) * 60:page * 60]  # AUTHOR_SERIES_PAGE_SIZE; `size` is ignored
+        has_next = page * 60 < len(rows)
+        return finish(200, {"section": section, "items": chunk, "page": page, "hasNext": has_next,
+                            "hasPrevious": page > 1, "nextUrl": None, "previousUrl": None, "query": None})
     if method == "GET" and route == "/plugin/catalog/books":
-        items = [list_item(b) for b in catalog.get("books", [])]
-        q = (query.get("q") or [""])[0].lower()
+        sort = (query.get("sort") or ["recently_added"])[0]
+        if sort not in ("title", "author", "recently_added", "recently_updated", "recently_read", "series"):
+            return bad_request("sort must be one of the following values")
+        status = (query.get("readStatus") or [""])[0]
+        if status not in ("", "unread", "reading", "finished"):
+            return bad_request("readStatus must be one of the following values")
+        filters = {}
+        for name in ("seriesId", "libraryId", "collectionId"):
+            value, invalid = positive_int(name)
+            if invalid:
+                return bad_request(f"{name} must be an integer number")
+            filters[name] = value
+        selected = list(catalog.get("books", []))
+        q = (query.get("q") or [""])[0].strip().lower()
         if q:
-            items = [i for i in items if q in i["title"].lower()]
+            selected = [b for b in selected if q in b["title"].lower() or q in (b.get("seriesName") or "").lower()
+                        or any(q in a.lower() for a in b.get("authors", []))]
+        author = (query.get("author") or [""])[0]
+        if author:
+            selected = [b for b in selected if author in b.get("authors", [])]
+        if filters["seriesId"]:
+            selected = [b for b in selected if b.get("seriesId") == filters["seriesId"]]
+        if filters["libraryId"]:
+            selected = [b for b in selected if b.get("libraryId") == filters["libraryId"]]
+        if filters["collectionId"]:
+            selected = [b for b in selected if filters["collectionId"] in b.get("collectionIds", [])]
+        if status == "unread":
+            selected = [b for b in selected if b.get("readStatus") not in reading_bucket + finished_bucket]
+        elif status == "reading":
+            selected = [b for b in selected if b.get("readStatus") in reading_bucket]
+        elif status == "finished":
+            selected = [b for b in selected if b.get("readStatus") in finished_bucket]
+        keys = {
+            "title": (lambda b: b["title"], False),
+            "author": (lambda b: (b.get("authors") or [""])[0], False),
+            "series": (lambda b: (b.get("seriesName") or "￿", b.get("seriesIndex") or 0), False),
+            "recently_added": (lambda b: b.get("addedAt", ""), True),
+            "recently_updated": (lambda b: b.get("addedAt", ""), True),
+            "recently_read": (lambda b: b.get("lastReadAt") or "", True),
+        }
+        key, descending = keys[sort]
+        selected.sort(key=key, reverse=descending)
+        items = [list_item(b) for b in selected]
         page = int((query.get("page") or ["1"])[0])
         size = int((query.get("size") or ["20"])[0])
         chunk = items[(page - 1) * size:page * size]
         return finish(200, {"items": chunk, "total": len(items), "page": page, "size": size,
-                            "hasNext": page * size < len(items), "hasPrevious": page > 1})
-    if method == "GET" and route.startswith("/plugin/catalog/books/"):
+                            "hasNext": page * size < len(items), "hasPrevious": page > 1,
+                            "nextUrl": None, "previousUrl": None})
+    if method == "GET" and route.startswith("/plugin/catalog/books/") and route.count("/") == 4:
         b = books.get(route.rsplit("/", 1)[1])
         if not b:
             return finish(404, {"error": "no such book"})
         detail = list_item(b)
-        detail.update({"files": [file_entry(f) for f in b.get("files", [])], "rating": None})
+        detail.update({"subtitle": None, "description": b.get("description"), "publisher": None,
+                       "publishedDate": None, "publishedYear": None, "language": "zh-TW", "isbn10": None,
+                       "isbn13": None, "libraryId": b.get("libraryId", 1), "libraryName": "Fixture",
+                       "rating": state.get("ratings", {}).get(str(b["id"])), "pageCount": None,
+                       "collections": [], "genres": [], "tags": [],
+                       "progress": None,
+                       "files": [file_entry(f) for f in b.get("files", [])],
+                       "relatedSections": [{"id": "author", "title": "More by this author", "books": [
+                           {"id": o["id"], "title": o["title"], "authors": o.get("authors", []), "seriesIndex": None,
+                            "hasCover": True, "thumbnailUrl": f"{catalog_base}/books/{o['id']}/thumbnail",
+                            "detailUrl": f"{catalog_base}/books/{o['id']}", "updatedAt": None}
+                           for o in catalog.get("books", [])[:8] if o["id"] != b["id"]]}]})
+        state_status = state.get("statuses", {}).get(str(b["id"]))
+        if state_status:
+            detail["readStatus"] = state_status
         return finish(200, detail)
+    if method == "PUT" and route.startswith("/plugin/catalog/books/") and route.endswith("/read-status"):
+        doc = json.loads(body or "{}")
+        if doc.get("status") not in ("unread", "want_to_read", "reading", "on_hold", "read", "abandoned"):
+            return bad_request("status must be one of the following values")
+        state.setdefault("statuses", {})[route.split("/")[-2]] = doc["status"]
+        return finish(200, {"readStatus": doc["status"]})
+    if method == "PUT" and route.startswith("/plugin/catalog/books/") and route.endswith("/rating"):
+        doc = json.loads(body or "{}")
+        rating = doc.get("rating")
+        state.setdefault("ratings", {})[route.split("/")[-2]] = rating
+        return finish(200, {"rating": rating})
     if method == "GET" and route.startswith("/plugin/catalog/files/") and route.endswith("/download"):
         if faults.get("download_status"):
             return finish(int(faults["download_status"]), {"error": "fixture fault"})
