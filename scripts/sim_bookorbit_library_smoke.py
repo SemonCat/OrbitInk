@@ -525,6 +525,22 @@ def after_suite(args, fx, state, flog, failures):
     _,routes=run('status-tabs',f)
     need([q.get('readStatus','') for q,s in gets(routes)]==['','reading','unread','finished',''],'fixed tabs did not send the exact status filters')
 
+    # Downloaded has no authoritative status filter: entering it from Reading must
+    # still render six grid cells, rather than inheriting the two-card page size.
+    f = enter()
+    for i in range(6):
+        f.press('ENTER').wait(600).press('ENTER').wait(1000).press('BACK').wait(500)
+        if i < 5:
+            f.press('RIGHT')
+    steps(f, 'LEFT', 5)
+    tool(tab(f, 1), 3).shot('covers.bmp', 'six downloaded books after the Reading tab')
+    tool(f, 0).shot('titles.bmp', 'six downloaded title rows after the Reading tab')
+    _, routes = run('downloaded-after-reading', f, fixture=visual)
+    need(len([r for r in routes if r[1].endswith('/download') and r[3] == 200]) == 6,
+         'downloaded-after-reading: fixture did not download all six books')
+    check('downloaded-after-reading', 'covers.bmp', 'covers')
+    check('downloaded-after-reading', 'titles.bmp', 'titles')
+
     # Existing repository image assets are extracted byte-for-byte, never normalized.
     original=fx.parent/'original-media';shutil.copytree(visual,original,dirs_exist_ok=True)
     manifest=[]

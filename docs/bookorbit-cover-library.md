@@ -31,6 +31,7 @@ Selection is an inside four-pixel closed outline (three pixels in title rows), n
 Journal crop brackets or an inverted book row. No empty book cells are fabricated.
 Other status tabs retain the selected cover/title browse model; Reading uses two cards
 when cover mode is selected and six rows when title mode is selected.
+Downloaded always uses six cover cells or title rows, including when entered from Reading.
 
 The packaged Chinese UI shares one resident 14pt SD fallback. `drawTextSized` shrinks its
 existing glyphs without allocating a second font or bitmap. Measurement and wrapping use

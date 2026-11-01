@@ -262,7 +262,8 @@ int BookOrbitCatalogBrowserActivity::rowHeight() const {
 }
 
 int BookOrbitCatalogBrowserActivity::listPageItems() const {
-  if (isBookBrowse()) return view == View::Covers && currentQuery.readStatus == "reading" ? 2 : 6;
+  if (isBookBrowse())
+    return listKind == ListKind::BOOKS && view == View::Covers && currentQuery.readStatus == "reading" ? 2 : 6;
   const auto& m = UITheme::getInstance().getMetrics();
   return std::max(1, (renderer.getScreenHeight() - listTop() - m.buttonHintsHeight - m.verticalSpacing) / rowHeight());
 }
