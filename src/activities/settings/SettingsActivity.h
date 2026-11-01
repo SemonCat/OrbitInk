@@ -167,9 +167,6 @@ class SettingsActivity final : public Activity {
   std::vector<SettingInfo> systemSettings;
   const std::vector<SettingInfo>* currentSettings = nullptr;
 
-  bool preserveQuickResumeTimeoutOn = false;
-  bool quickResumeTimeoutAutoEnabled = false;
-
   OptionPopup optionPopup;
 
   static constexpr int categoryCount = 4;
@@ -180,7 +177,6 @@ class SettingsActivity final : public Activity {
   void openSleepTimeoutPicker();
   void openDeviceNameEditor();
   void rebuildSettingsLists();
-  void syncQuickResumeTimeoutForSleepScreen(bool sleepScreenChanged, bool quickResumeTimeoutChanged);
 
  public:
   explicit SettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)

@@ -23,12 +23,10 @@
 void SleepActivity::onEnter() {
   Activity::onEnter();
 
-  const bool renderQuickResume = SETTINGS.isQuickResumeSleep(fromTimeout, APP_STATE.lastSleepFromReader);
-
-  if (renderQuickResume || SETTINGS.sleepScreen == CrossPointSettings::TRANSPARENT_OVERLAY) {
+  if (policy.preserveView) {
     if (auto* cache = renderer.getFontCacheManager()) cache->forceReleaseTransientCaches();
     const auto previousOrientation = renderer.getOrientation();
-    if (APP_STATE.lastSleepFromReader) ReaderUtils::applyOrientation(renderer, SETTINGS.orientation);
+    if (policy.fromReader) ReaderUtils::applyOrientation(renderer, SETTINGS.orientation);
     const bool rendered = renderTransparentCustomSleepScreen();
     renderer.setOrientation(previousOrientation);
     if (rendered) return;
@@ -36,7 +34,7 @@ void SleepActivity::onEnter() {
   }
 
   // Show popup with reader orientation only when going to sleep from reader
-  if (APP_STATE.lastSleepFromReader) {
+  if (policy.fromReader) {
     ReaderUtils::applyOrientation(renderer, SETTINGS.orientation);
     GUI.drawPopup(renderer, tr(STR_ENTERING_SLEEP));
     renderer.setOrientation(GfxRenderer::Orientation::Portrait);
@@ -44,19 +42,13 @@ void SleepActivity::onEnter() {
     GUI.drawPopup(renderer, tr(STR_ENTERING_SLEEP));
   }
 
-  switch (SETTINGS.sleepScreen) {
+  switch (policy.screen) {
     case (CrossPointSettings::SLEEP_SCREEN_MODE::BLANK):
       return renderBlankSleepScreen();
     case (CrossPointSettings::SLEEP_SCREEN_MODE::CUSTOM):
       return renderCustomSleepScreen();
     case (CrossPointSettings::SLEEP_SCREEN_MODE::COVER):
       return renderCoverSleepScreen();
-    case (CrossPointSettings::SLEEP_SCREEN_MODE::COVER_CUSTOM):
-      if (APP_STATE.lastSleepFromReader) {
-        return renderCoverSleepScreen();
-      } else {
-        return renderCustomSleepScreen();
-      }
     default:
       return renderDefaultSleepScreen();
   }

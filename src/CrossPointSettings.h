@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <string>
 
+#include "util/SleepScreenPolicy.h"
+
 // Set to 1 only by the x3_zh_tw_custom PlatformIO environment (platformio.ini).
 // Gates fresh-install DEFAULTS only (see fontPointSize/sdFontFamilyName/language
 // below) -- every other build keeps upstream defaults unchanged.
@@ -397,6 +399,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // credentials. See BookOrbitSetupPolicy.h and BookOrbitSetupGuideActivity::recordHandledIfConfigured.
   uint8_t bookOrbitSetupGuideDismissed = 0;
   // Quick Resume: keep current content visible with moon icon instead of showing a static sleep screen.
+  // Retained for settings round trips / downgrade compatibility; no longer overrides sleepScreen.
   uint8_t quickResumeSleepScreen = QUICK_RESUME_NEVER;
   // Track per-book/global reading time and pace to derive time-read/time-left estimates (0 = off,
   // 1 = on). Default off, matching this fork's opt-in philosophy -- see
@@ -498,19 +501,12 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   float getReaderLineCompression() const;
   unsigned long getSleepTimeoutMs() const;
   int getRefreshFrequency() const;
-  // True if a sleep entered right now should render/restore via the quick-resume ("last screen" +
-  // moon icon) path instead of the configured static sleepScreen. Shared by
-  // main.cpp::enterDeepSleep() (whether to save the framebuffer) and SleepActivity::onEnter()
-  // (what to render), so the two decisions can never drift out of sync.
-  //
-  // isReaderActivity gates the whole decision: quick-resume's premise is resuming a reading
-  // position, so it's meaningless (and, on wake, actively wasteful -- a saved frame that gets
-  // thrown away and repainted over) when sleep wasn't entered from the reader, regardless of
-  // sleepScreen/quickResumeSleepScreen or how sleep was triggered. Callers pass this rather than
-  // the method querying it itself: main.cpp has a live ActivityManager to ask, while
-  // SleepActivity runs after the reader activity has already been replaced by this one, so it
-  // must use the APP_STATE.lastSleepFromReader flag captured at sleep-entry time instead.
-  bool isQuickResumeSleep(bool fromTimeout, bool isReaderActivity) const;
+  // Trigger-independent renderer and wake policy, captured before reader onExit().
+  SleepScreenPolicy sleepScreenPolicy(bool fromReader) const {
+    const auto screen = static_cast<uint8_t>(sleepScreen == COVER_CUSTOM ? (fromReader ? COVER : CUSTOM) : sleepScreen);
+    const bool preserveView = screen == TRANSPARENT_OVERLAY || (screen == QUICK_RESUME && fromReader);
+    return {screen, fromReader, preserveView, preserveView && fromReader};
+  }
 };
 
 // Helper macro to access settings

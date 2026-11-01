@@ -437,7 +437,12 @@ void forEachPersistedSetting(Fn&& fn) {
 inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* registry = nullptr,
                                                 const std::vector<DictionaryEntry>* dictionaries = nullptr) {
   std::vector<SettingInfo> v = baseSettingsList();
-  v.erase(std::remove_if(v.begin(), v.end(), settingHiddenOnThisBoard), v.end());
+  v.erase(std::remove_if(v.begin(), v.end(),
+                         [](const SettingInfo& s) {
+                           // Keep the retired key in baseSettingsList for persistence only.
+                           return settingHiddenOnThisBoard(s) || s.nameId == StrId::STR_QUICK_RESUME_TIMEOUT;
+                         }),
+          v.end());
   if (registry && registry->getFamilyCount() > 0) {
     auto it = std::find_if(v.begin(), v.end(), [](const SettingInfo& s) { return s.nameId == StrId::STR_FONT_FAMILY; });
     if (it != v.end()) {

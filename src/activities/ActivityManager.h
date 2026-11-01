@@ -14,6 +14,7 @@
 #include "GfxRenderer.h"
 #include "MappedInputManager.h"
 #include "util/ScreenshotInfo.h"
+#include "util/SleepScreenPolicy.h"
 
 class Activity;    // forward declaration
 class RenderLock;  // forward declaration
@@ -134,7 +135,7 @@ class ActivityManager {
   // to EpubReaderActivity; ignored for TXT/XTC/BMP.
   void goToReader(std::string path, bool allowFastInitialRefresh = false, bool checkRemoteProgress = false,
                   bool skipInitialRender = false);
-  void goToSleep(bool fromTimeout = false);
+  void goToSleep(const SleepScreenPolicy& policy);
   void goToBoot();
   void goToFullScreenMessage(std::string message, EpdFontFamily::Style style = EpdFontFamily::REGULAR);
   void goToCrashReport();

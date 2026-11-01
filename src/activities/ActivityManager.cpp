@@ -300,8 +300,8 @@ void ActivityManager::goToReader(std::string path, const bool allowFastInitialRe
                                                    skipInitialRender && !appliedDeferred));
 }
 
-void ActivityManager::goToSleep(bool fromTimeout) {
-  replaceActivity(std::make_unique<SleepActivity>(renderer, mappedInput, fromTimeout));
+void ActivityManager::goToSleep(const SleepScreenPolicy& policy) {
+  replaceActivity(std::make_unique<SleepActivity>(renderer, mappedInput, policy));
   loop();  // Important: sleep screen must be rendered immediately, the caller will go to sleep right after this returns
 }
 

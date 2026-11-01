@@ -416,14 +416,6 @@ unsigned long CrossPointSettings::getSleepTimeoutMs() const {
   return static_cast<unsigned long>(minutes) * 60UL * 1000UL;
 }
 
-bool CrossPointSettings::isQuickResumeSleep(const bool fromTimeout, const bool isReaderActivity) const {
-  if (!isReaderActivity) {
-    return false;
-  }
-  return sleepScreen == SLEEP_SCREEN_MODE::QUICK_RESUME || sleepScreen == SLEEP_SCREEN_MODE::TRANSPARENT_OVERLAY ||
-         (fromTimeout && quickResumeSleepScreen == QUICK_RESUME_SLEEP_SCREEN::QUICK_RESUME_AFTER_TIMEOUT);
-}
-
 int CrossPointSettings::getRefreshFrequency() const {
   switch (refreshFrequency) {
     case REFRESH_1:

@@ -1,13 +1,14 @@
 #pragma once
 #include "activities/Activity.h"
+#include "util/SleepScreenPolicy.h"
 
 class Bitmap;
 class HalFile;
 
 class SleepActivity final : public Activity {
  public:
-  explicit SleepActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, bool fromTimeout = false)
-      : Activity("Sleep", renderer, mappedInput), fromTimeout(fromTimeout) {}
+  explicit SleepActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, const SleepScreenPolicy& policy)
+      : Activity("Sleep", renderer, mappedInput), policy(policy) {}
   void onEnter() override;
 
  private:
@@ -22,5 +23,5 @@ class SleepActivity final : public Activity {
   void renderLastScreenSleepScreen() const;
   void renderBlankSleepScreen() const;
 
-  bool fromTimeout = false;
+  const SleepScreenPolicy policy;
 };

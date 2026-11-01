@@ -20,6 +20,10 @@
 
 #include <cstring>
 
+#ifdef SIMULATOR
+#include <SleepTestHooks.h>
+#endif
+
 #include "BookOrbitCredentialStore.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
@@ -246,16 +250,18 @@ void enterDeepSleep(bool fromTimeout = false) {
   // Must be read before goToSleep() below replaces currentActivity with SleepActivity.
   const bool quickResumeCleanBaseView = activityManager.isQuickResumeBaseViewEligible();
 
-  const bool isQuickResumeSleep = SETTINGS.isQuickResumeSleep(fromTimeout, APP_STATE.lastSleepFromReader);
-  APP_STATE.showBootScreen = !isQuickResumeSleep;
+  const auto sleepPolicy = SETTINGS.sleepScreenPolicy(APP_STATE.lastSleepFromReader);
+  LOG_DBG("SLP", "Sleep entry trigger=%s reader=%d selected=%u screen=%u preserve=%d resume=%d",
+          fromTimeout ? "idle" : "manual", sleepPolicy.fromReader, SETTINGS.sleepScreen, sleepPolicy.screen,
+          sleepPolicy.preserveView, sleepPolicy.resumeReader);
+  APP_STATE.showBootScreen = !sleepPolicy.resumeReader;
   // Consumed once at the next QuickResume boot to additionally gate skipping the initial page
   // render (see the BootResume::QuickResume case below). Also requires the on-disk section cache
   // and saved page to validate at boot time -- this bit alone is necessary but not sufficient.
-  APP_STATE.quickResumeSkipRenderEligible = isQuickResumeSleep && quickResumeCleanBaseView;
+  APP_STATE.quickResumeSkipRenderEligible = sleepPolicy.resumeReader && quickResumeCleanBaseView;
 
   // Save the clean view before decoration, also as rollback for a failed overlay decode.
-  const bool needsOverlayBase = SETTINGS.sleepScreen == CrossPointSettings::TRANSPARENT_OVERLAY;
-  if (isQuickResumeSleep || needsOverlayBase) {
+  if (sleepPolicy.preserveView) {
     RenderLock lock;
     if (!saveSleepFrameBuffer()) APP_STATE.quickResumeSkipRenderEligible = false;
   }
@@ -264,8 +270,8 @@ void enterDeepSleep(bool fromTimeout = false) {
   // Commit to sleeping before goToSleep() runs the outgoing activity's onExit():
   // a WiFi activity would otherwise silentRestart() here and reboot instead.
   deepSleepInProgress = true;
-  activityManager.goToSleep(fromTimeout);
-  if (needsOverlayBase && !isQuickResumeSleep) Storage.remove(SLEEP_FRAME_FILE);
+  activityManager.goToSleep(sleepPolicy);
+  if (sleepPolicy.preserveView && !sleepPolicy.resumeReader) Storage.remove(SLEEP_FRAME_FILE);
 
   // Each provider keeps its own outcome and TLS session within one radio interval.
   ProgressSyncReceipt::begin(ProgressSyncReceipt::Trigger::Sleep);
@@ -746,7 +752,12 @@ void loop() {
     screenshotComboActive = false;
   }
 
-  const unsigned long sleepTimeoutMs = SETTINGS.getSleepTimeoutMs();
+  const unsigned long sleepTimeoutMs =
+#ifdef SIMULATOR
+      crossfadeSimSleepTimeoutMs(SETTINGS.getSleepTimeoutMs());
+#else
+      SETTINGS.getSleepTimeoutMs();
+#endif
   if (sleepTimeoutMs > 0 && millis() - lastActivityTime >= sleepTimeoutMs) {
     LOG_DBG("SLP", "Auto-sleep triggered after %lu ms of inactivity", sleepTimeoutMs);
     enterDeepSleep(true);

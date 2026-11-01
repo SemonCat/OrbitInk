@@ -114,6 +114,8 @@ uint32_t HalPowerManager::retainedSleepCycles() {
 // `sleepDelayMicros` from now, on top of the button wakeups the pinned single-argument overload
 // already covers. Without the divisor the delay is unused and this blocks for a button wake.
 void HalPowerManager::startDeepSleep(HalGPIO& gpio, uint64_t sleepDelayMicros) const {
+  extern void crossfadeSimCaptureSleep();
+  crossfadeSimCaptureSleep();
   // Device: the RTC delay is cleared, then set only when a timer is armed; every sleep counts.
   if (sleepDelayMicros != 0) {
     setenv(RTC_DELAY_ENV, std::to_string(sleepDelayMicros).c_str(), 1);
