@@ -86,6 +86,7 @@ class BookOrbitCatalogClient {
     std::string readStatus;         // display-only, opaque; empty when absent
     std::string seriesName;         // display-only; empty when the book is in no series
     std::string seriesIndex;        // server's seriesIndex as display text ("2", "2.5"); empty when absent
+    bool hasCover = false;
   };
 
   /** One page of book listing results. */
@@ -224,6 +225,10 @@ class BookOrbitCatalogClient {
 
     /** GET .../plugin/catalog/books, filtered/paged/sorted per `query`. */
     Error fetchBooks(const BookQuery& query, BookPage& out, const AbortCallback& shouldAbort = nullptr);
+    // Fixed authenticated endpoint derived from a numeric book id; never follows thumbnailUrl.
+    // Optional media: 96 KiB maximum streamed to an app-owned scratch path, 3 second timeout.
+    Error fetchThumbnail(const std::string& bookId, const std::string& scratchPath,
+                         const AbortCallback& shouldAbort = nullptr);
 
     /**
      * GET .../plugin/catalog/sections/{sectionId} -- facet listing for one of the server's

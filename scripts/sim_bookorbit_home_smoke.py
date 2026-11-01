@@ -251,19 +251,19 @@ def main() -> int:
     make_sd(wa)
     state, flog = root / "state.json", root / "requests.jsonl"
     env = fixture_env(fx, state, flog)
-    acts, _ = script("ENTER", "DOWN", "DOWN", "ENTER", "DOWN", "DOWN", "ENTER", "ENTER", "wait2500", "ENTER", "wait4000")
+    acts, _ = script("ENTER", "RIGHT", "ENTER", "ENTER", "wait2500", "ENTER", "wait4000")
     log_a = run.go("A", wa, env, acts, [
         (1300, "A1-home-empty.bmp", "Home, no book yet: hero invites the library"),
-        (2600, "A2-library-root.bmp", "Library root: search, local books, localized server sections"),
-        (6500, "A3-books.bmp", "All books: two-line rows, progress"),
-        (10500, "A4-detail.bmp", "Book detail: 下載 is the primary action"),
-        (14300, "A5-downloaded.bmp", "After download: 開啟閱讀 focused"),
-        (18700, "A6-reader.bmp", "Reader on the downloaded copy"),
+        (2600, "A2-library-root.bmp", "Library enters directly into cover books"),
+        (3900, "A3-books.bmp", "All books: compact covers and title/author/status"),
+        (5200, "A4-detail.bmp", "Book detail: 下載 is the primary action"),
+        (7600, "A5-downloaded.bmp", "After download: 開啟閱讀 focused"),
+        (12000, "A6-reader.bmp", "Reader on the downloaded copy"),
     ])
     no_tofu("A", log_a)
     need(failures, "Applied X3 zh-TW BookOrbit Home profile" in log_a, "A: zh-TW profile did not apply the BookOrbit Home")
     paths = [r["path"].rsplit("/koreader", 1)[1] for r in requests(flog)]
-    for route in ("/plugin/catalog/root", "/plugin/catalog/books", "/plugin/catalog/books/101",
+    for route in ("/plugin/catalog/books", "/plugin/catalog/books/101",
                   "/plugin/catalog/files/1001/download"):
         need(failures, route in paths, f"A: fixture never saw {route}")
     downloads = list((wa / "fs_" / "BookOrbit").glob("*.epub"))
@@ -348,10 +348,10 @@ def main() -> int:
     state_f, log_f = root / "state-transient.json", root / "requests-transient.jsonl"
     set_faults(state_f, {"fail_once": "/plugin/catalog/books"})
     env_f = fixture_env(fx, state_f, log_f)
-    acts, _ = script("ENTER", "DOWN", "DOWN", "ENTER", "wait1000", "ENTER", "wait1500")
+    acts, _ = script("ENTER", "BACK", "DOWN", "DOWN", "DOWN", "DOWN", "DOWN", "DOWN", "ENTER", "wait1500")
     log_f1 = run.go("F1", wf, env_f, acts, [
-        (5700, "F1-transient-error.bmp", "Uncached list after one transport failure: error + Retry"),
-        (8100, "F1-retried-list.bmp", "Same visit, after Retry: the list loaded from the server"),
+        (2600, "F1-transient-error.bmp", "Uncached offline visit: local books and reachable tools"),
+        (13500, "F1-retried-list.bmp", "Same visit, after Retry: the list loaded from the server"),
     ])
     no_tofu("F1", log_f1)
     books_calls = [r for r in requests(log_f) if r["path"].endswith("/plugin/catalog/books")]
@@ -360,17 +360,17 @@ def main() -> int:
     need(failures, entered(log_f1, "BookOrbitCatalogBrowser") == 1, "F1: recovery left the library (needs one visit)")
     # F2 cached-offline: the ROOT fails once, so the library opens on its cached root in offline
     # mode; opening a section must reach the server again (without leaving the library) and recover.
-    set_faults(state_f, {"fail_once": "/plugin/catalog/root"})
+    set_faults(state_f, {"fail_once": "/plugin/catalog/books"})
     n_before = len(requests(log_f))
-    acts, _ = script("ENTER", "wait1000", "DOWN", "ENTER", "wait1500", "BACK", "wait1500")
+    acts, _ = script("ENTER", "BACK", "DOWN", "DOWN", "DOWN", "DOWN", "DOWN", "DOWN", "ENTER", "BACK", "DOWN", "DOWN", "DOWN", "DOWN", "ENTER", "wait1500")
     log_f2 = run.go("F2", wf, env_f, acts, [
-        (2700, "F2-cached-offline-root.bmp", "Root after a transport failure: offline banner, cached sections"),
-        (5600, "F2-recovered-list.bmp", "Same visit: opening a section went back online"),
-        (7600, "F2-root-online-again.bmp", "Back to the root: online again, no offline banner"),
+        (2600, "F2-cached-offline-root.bmp", "Cached books after transport failure: offline banner"),
+        (13500, "F2-recovered-list.bmp", "Same visit: opening a section went back online"),
+        (21300, "F2-root-online-again.bmp", "Back to the root: online again, no offline banner"),
     ])
     no_tofu("F2", log_f2)
     seq = [(r["path"].rsplit("/koreader", 1)[1], r["status"]) for r in requests(log_f)[n_before:]]
-    need(failures, bool(seq) and seq[0] == ("/plugin/catalog/root", 0), f"F2: root failure not injected ({seq[:3]})")
+    need(failures, bool(seq) and seq[0] == ("/plugin/catalog/books", 0), f"F2: root failure not injected ({seq[:3]})")
     need(failures, ("/plugin/catalog/books", 200) in seq, f"F2: no successful request after recovery ({seq})")
     need(failures, ("/plugin/catalog/root", 200) in seq, f"F2: returning to the root did not go back online ({seq})")
     need(failures, entered(log_f2, "BookOrbitCatalogBrowser") == 1, "F2: recovery left the library (needs one visit)")
@@ -382,11 +382,11 @@ def main() -> int:
     set_faults(state_c, {"offline": True})
     env_c = fixture_env(fx, state_c, root / "requests-offline.jsonl")
     # Home focus: hero, (no also-reading row), 書庫 tile -> DOWN once.
-    acts, _ = script("DOWN", "ENTER", "wait1500", "ENTER", "ENTER", "DOWN", "wait300", "UP", "ENTER", "wait3500")
+    acts, _ = script("DOWN", "ENTER", "wait1500", "BACK", "DOWN", "DOWN", "DOWN", "ENTER", "ENTER", "ENTER", "wait3500")
     log_c = run.go("C", wc, env_c, acts, [
         (4000, "C1-library-offline.bmp", "Library offline: banner, 已下載 and cached sections"),
-        (5300, "C2-downloaded-list.bmp", "已下載: the book, works offline"),
-        (6600, "C3-detail-offline.bmp", "Detail offline: 開啟閱讀 available"),
+        (13000, "C2-downloaded-list.bmp", "已下載: the book, works offline"),
+        (14300, "C3-detail-offline.bmp", "Detail offline: 開啟閱讀 available"),
     ])
     no_tofu("C", log_c)
     need(failures, entered(log_c, "EpubReader") >= 1, "C: the downloaded book did not open offline")
@@ -397,10 +397,10 @@ def main() -> int:
     state_d = root / "state-fault.json"
     set_faults(state_d, {"download_status": 500})
     env_d = fixture_env(fx, state_d, root / "requests-fault.jsonl")
-    acts, _ = script("ENTER", "DOWN", "DOWN", "ENTER", "DOWN", "ENTER", "ENTER", "wait2500", "wait1500")
+    acts, _ = script("ENTER", "RIGHT", "ENTER", "ENTER", "wait2500", "wait1500")
     run.expected_errs = ("unexpected status: 500", "Download failed: Server error")  # the injected fault
     log_d = run.go("D", wd, env_d, acts, [
-        (13000, "D1-download-failed.bmp", "Detail after a failed download: 下載失敗 · 重試"),
+        (7600, "D1-download-failed.bmp", "Detail after a failed download: 下載失敗 · 重試"),
     ])
     run.expected_errs = ()
     no_tofu("D", log_d)

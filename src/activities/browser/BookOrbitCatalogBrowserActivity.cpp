@@ -96,12 +96,6 @@ const char* filterLabel(int i) {
   const StrId ids[] = {StrId::STR_BO_ALL_STATES, StrId::STR_BO_UNREAD, StrId::STR_BO_READING, StrId::STR_BO_FINISHED};
   return I18N.get(ids[i]);
 }
-std::string sortFilterLabel(const BOClient::BookQuery& query) {
-  int sort = 0, filter = 0;
-  for (int i = 0; i < 6; ++i) if (query.sort == SORTS[i]) sort = i;
-  for (int i = 0; i < 4; ++i) if (query.readStatus == FILTERS[i]) filter = i;
-  return std::string(tr(STR_BO_SORT)) + ": " + sortLabel(sort) + " / " + filterLabel(filter);
-}
 const char* statusLabel(const std::string& status) {
   using State = BookOrbitCatalogBrowserPolicy::ReadState;
   switch (BookOrbitCatalogBrowserPolicy::readState(status)) {
@@ -162,6 +156,10 @@ void BookOrbitCatalogBrowserActivity::onEnter() {
   resumeRequestAfterWifi = retryDetail = false;
   currentPageHasNext = false;
   selectorIndex = 0;
+  view = View::Covers;
+  browseFocus = -1;
+  enteringLibrary = true;
+  browseIdleAt = millis();
   totalBooks = 0;
   location = tr(STR_BO_LIBRARY);
   listNotice.clear();
@@ -180,6 +178,7 @@ void BookOrbitCatalogBrowserActivity::onEnter() {
   if (!owner.isZero()) {
     library = makeUniqueNoThrow<BookOrbitLibrary::Store>(owner, bookOrbitFirmwareSha256());
     catalogCache = makeUniqueNoThrow<BookOrbitCatalogCache::Cache>(owner, bookOrbitFirmwareSha256());
+    coverCache = makeUniqueNoThrow<BookOrbitCoverCache>(owner);
     if (!library || !catalogCache) LOG_ERR("BOCatalog", "OOM: library stores");
   }
   statusMessage = tr(STR_CHECKING_WIFI);
@@ -199,6 +198,7 @@ void BookOrbitCatalogBrowserActivity::onExit() {
   navigationHistory.clear();
   library.reset();
   catalogCache.reset();
+  coverCache.reset();
 
   if (WiFi.getMode() != WIFI_MODE_NULL) {
     WiFi.disconnect(false);
@@ -237,11 +237,11 @@ size_t BookOrbitCatalogBrowserActivity::itemCount() const {
 }
 
 size_t BookOrbitCatalogBrowserActivity::displayCount() const {
-  return itemCount() + (listKind == ListKind::BOOKS ? 1 : 0);
+  return itemCount();
 }
 
 size_t BookOrbitCatalogBrowserActivity::toItemIndex(const size_t displayIndex) const {
-  return listKind == ListKind::BOOKS ? displayIndex - 1 : displayIndex;
+  return displayIndex;
 }
 
 int BookOrbitCatalogBrowserActivity::contextLineHeight() const {
@@ -262,11 +262,13 @@ int BookOrbitCatalogBrowserActivity::rowHeight() const {
 }
 
 int BookOrbitCatalogBrowserActivity::listPageItems() const {
+  if (isBookBrowse()) return view == View::Covers && currentQuery.readStatus == "reading" ? 2 : 6;
   const auto& m = UITheme::getInstance().getMetrics();
   return std::max(1, (renderer.getScreenHeight() - listTop() - m.buttonHintsHeight - m.verticalSpacing) / rowHeight());
 }
 
 void BookOrbitCatalogBrowserActivity::moveSelection(int delta) {
+  browseIdleAt = millis();
   const auto move = BookOrbitCatalogBrowserPolicy::moveInList(currentPage, selectorIndex,
       static_cast<int>(displayCount()), currentPageHasNext, delta);
   if (!move.fetch || listKind == ListKind::ROOT) {
@@ -304,6 +306,50 @@ void BookOrbitCatalogBrowserActivity::loop() {
   }
   if (consumeBack && mappedInput.wasReleased(MappedInputManager::Button::Back)) {
     consumeBack = false;
+    return;
+  }
+
+  if (state == BrowserState::TOOLS) {
+    if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+      state = BrowserState::BROWSING;
+      requestUpdate();
+    } else if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+      switch (choiceIndex) {
+        case 0:
+          view = view == View::Covers ? View::Titles : View::Covers;
+          state = BrowserState::BROWSING;
+          browseFocus = -1;
+          browseIdleAt = millis();
+          break;
+        case 1: launchSearch(); return;
+        case 2: choiceIndex = 0; state = BrowserState::OPTIONS; break;
+        case 3:
+        case 4:
+          navigationHistory.push({listKind, facetKind, currentQuery, currentPage, selectorIndex, location});
+          if (choiceIndex == 3) { location = tr(STR_BO_LOCAL); loadDownloaded(0); }
+          else loadRoot();
+          browseFocus = -1;
+          break;
+        case 5: navigateBack(); return;
+        case 6:
+          if (wifiConnected()) {
+            offline = false;
+            if (listKind == ListKind::DOWNLOADED) {
+              currentQuery = BOClient::BookQuery{};
+              currentQuery.sort = "title";
+              location = tr(STR_BO_ALL_BOOKS);
+              loadBooks(0);
+            } else retryRequest();
+          }
+          else { resumeRequestAfterWifi = true; launchWifiSelection(); }
+          return;
+        case 7: goBackOrHome(); return;
+      }
+      requestUpdate();
+    } else {
+      buttonNavigator.onNextRelease([this] { choiceIndex = std::min(7, choiceIndex + 1); requestUpdate(); });
+      buttonNavigator.onPreviousRelease([this] { choiceIndex = std::max(0, choiceIndex - 1); requestUpdate(); });
+    }
     return;
   }
 
@@ -404,6 +450,34 @@ void BookOrbitCatalogBrowserActivity::loop() {
   }
 
   if (state == BrowserState::BROWSING) {
+    if (isBookBrowse()) {
+      if (mappedInput.wasReleased(MappedInputManager::Button::Back)) { openTools(); return; }
+      if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+        if (browseFocus == 4) openTools();
+        else if (browseFocus >= 0) changeTab(browseFocus);
+        else activateSelected();
+        return;
+      }
+      // Front arrows select; side buttons page. NavNext combines both and must not be used here.
+      if (mappedInput.wasReleased(MappedInputManager::Button::Down)) { pageBrowse(1); return; }
+      if (mappedInput.wasReleased(MappedInputManager::Button::Up)) { pageBrowse(-1); return; }
+      if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
+        if (browseFocus >= 0) { browseFocus = browseFocus == 4 ? -1 : browseFocus + 1; requestUpdate(); }
+        else moveSelection(1);
+        browseIdleAt = millis();
+        return;
+      }
+      if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
+        if (browseFocus >= 0) browseFocus = std::max(0, browseFocus - 1);
+        else if (selectorIndex == 0) browseFocus = 4;
+        else { moveSelection(-1); return; }
+        browseIdleAt = millis();
+        requestUpdate();
+        return;
+      }
+      fetchVisibleCover();
+      return;
+    }
     if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
       activateSelected();
       return;
@@ -433,11 +507,13 @@ std::string ratingDisplayText(int rating) {
 
 void BookOrbitCatalogBrowserActivity::render(RenderLock&&) {
   renderer.clearScreen();
+  if (state == BrowserState::BROWSING && isBookBrowse()) { renderLibrary(); return; }
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int pageWidth = renderer.getScreenWidth();
   const int pageHeight = renderer.getScreenHeight();
-  const bool choices = state == BrowserState::OPTIONS || state == BrowserState::READ_STATUS || state == BrowserState::RATING;
-  const char* title = state == BrowserState::OPTIONS ? tr(STR_BO_OPTIONS) :
+  const bool choices = state == BrowserState::OPTIONS || state == BrowserState::READ_STATUS || state == BrowserState::RATING ||
+                       state == BrowserState::TOOLS;
+  const char* title = state == BrowserState::TOOLS ? tr(STR_BO_TOOLS) : state == BrowserState::OPTIONS ? tr(STR_BO_OPTIONS) :
                       state == BrowserState::READ_STATUS ? tr(STR_BOOKORBIT_READ_STATUS) :
                       state == BrowserState::RATING ? tr(STR_BOOKORBIT_RATING) : tr(STR_BO_LIBRARY);
   GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, title);
@@ -497,8 +573,20 @@ void BookOrbitCatalogBrowserActivity::render(RenderLock&&) {
   if (state == BrowserState::DETAIL) { renderDetail(pageWidth, pageHeight); return; }
 
   if (choices) {
-    const int count = state == BrowserState::OPTIONS ? 11 : 6;
+    const int count = state == BrowserState::TOOLS ? 8 : state == BrowserState::OPTIONS ? 11 : 6;
     const auto label = [this](int i) -> std::string {
+      if (state == BrowserState::TOOLS) {
+        switch (i) {
+          case 0: return (view == View::Covers ? tr(STR_BO_TITLE_VIEW) : tr(STR_BO_COVER_VIEW));
+          case 1: return tr(STR_BO_SEARCH_LIST);
+          case 2: return tr(STR_BO_OPTIONS);
+          case 3: return tr(STR_BO_LOCAL);
+          case 4: return tr(STR_BO_LOCATIONS);
+          case 5: return tr(STR_BO_PARENT);
+          case 6: return tr(STR_RETRY);
+          default: return tr(STR_BO_EXIT);
+        }
+      }
       if (state == BrowserState::OPTIONS) {
         if (i < 6) return std::string(tr(STR_BO_SORT)) + ": " + sortLabel(i);
         if (i < 10) return std::string(tr(STR_BO_FILTER)) + ": " + filterLabel(i - 6);
@@ -512,7 +600,8 @@ void BookOrbitCatalogBrowserActivity::render(RenderLock&&) {
       if (state == BrowserState::OPTIONS) {
         current = i < 6 ? (currentQuery.sort.empty() ? i == 0 : currentQuery.sort == SORTS[i]) :
                   i < 10 && currentQuery.readStatus == FILTERS[i - 6];
-      } else if (state == BrowserState::READ_STATUS) {
+      } else if (state == BrowserState::TOOLS) return "";
+      else if (state == BrowserState::READ_STATUS) {
         current = BookOrbitCatalogBrowserPolicy::readState(detail.readStatus) ==
                   BookOrbitCatalogBrowserPolicy::readState(BOClient::SETTABLE_READ_STATUSES[i]);
       } else current = i == std::max(0, detail.rating);
@@ -545,11 +634,7 @@ void BookOrbitCatalogBrowserActivity::render(RenderLock&&) {
       }
       const bool black = journal || !selected;
       std::string label, sub, value;
-      if (listKind == ListKind::BOOKS && i == 0) {
-        label = sortFilterLabel(currentQuery);
-        sub = currentQuery.searchText.empty() ? tr(STR_BO_SEARCH_LIST) :
-              std::string(tr(STR_SEARCH)) + ": " + currentQuery.searchText;
-      } else {
+      {
         const size_t item = toItemIndex(i);
         if (listKind == ListKind::ROOT) {
           label = sections[item].title;
@@ -741,6 +826,19 @@ void BookOrbitCatalogBrowserActivity::enterOffline() {
 }
 
 void BookOrbitCatalogBrowserActivity::loadRoot() {
+  if (enteringLibrary) {
+    enteringLibrary = false;
+    currentQuery.sort = "title";
+    location = tr(STR_BO_ALL_BOOKS);
+    localBookCount = library ? library->count() : 0;
+    loadBooks(0);
+    if (state == BrowserState::ERROR && offline) {
+      location = tr(STR_BO_LOCAL);
+      loadDownloaded(0);
+    }
+    if (pendingSearch && !offline) { pendingSearch = false; launchSearch(); }
+    return;
+  }
   listKind = ListKind::ROOT;
   requestedPage = 0;
   retryDetail = false;
@@ -846,6 +944,8 @@ void BookOrbitCatalogBrowserActivity::loadBooks(const int page) {
   std::vector<BOClient::FacetEntry>().swap(facets);
   std::vector<BookOrbitLibrary::Entry>().swap(downloaded);
   markDownloadedBooks();
+  coverAttempts.assign(books.size(), 0);
+  browseIdleAt = millis();
   currentPage = page;
   // Offline, only the cached page exists: never offer a next page that cannot be loaded.
   currentPageHasNext = fromCache ? false : result.hasNext;
@@ -911,7 +1011,8 @@ void BookOrbitCatalogBrowserActivity::loadFacets(const int page) {
 void BookOrbitCatalogBrowserActivity::loadDownloaded(const int page) {
   requestedPage = page;
   listKind = ListKind::DOWNLOADED;
-  const int pageSize = listPageItems();
+  localBookCount = library ? library->count() : 0;
+  const int pageSize = BOClient::PAGE_SIZE;
   std::vector<BookOrbitLibrary::Entry> rows(static_cast<size_t>(pageSize) + 1);
   size_t got = 0;
   if (library) got = library->page(static_cast<size_t>(page) * pageSize, rows.data(), rows.size());
@@ -934,12 +1035,6 @@ void BookOrbitCatalogBrowserActivity::loadDownloaded(const int page) {
 void BookOrbitCatalogBrowserActivity::activateSelected() {
   const size_t count = displayCount();
   if (count == 0 || static_cast<size_t>(selectorIndex) >= count) return;
-
-  if (listKind == ListKind::BOOKS && selectorIndex == 0) {
-    retryNetworkIfLinkUp();
-    if (!offline) { choiceIndex = 0; state = BrowserState::OPTIONS; requestUpdate(); }
-    return;
-  }
 
   const size_t itemIndex = toItemIndex(static_cast<size_t>(selectorIndex));
   switch (listKind) {
@@ -1301,6 +1396,7 @@ void BookOrbitCatalogBrowserActivity::applyChoice() {
 
 void BookOrbitCatalogBrowserActivity::returnFromDetail() {
   detailError.clear();
+  localBookCount = library ? library->count() : 0;
   markDownloadedBooks();
   for (auto& book : books) if (book.id == detail.id) {
     book.readStatus = detail.readStatus;
@@ -1366,6 +1462,8 @@ void BookOrbitCatalogBrowserActivity::launchSearch() {
 
   auto keyboard = std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_SEARCH));
   startActivityForResult(std::move(keyboard), [this](const ActivityResult& result) {
+    // The keyboard completes on release; there is no held Confirm left to consume.
+    consumeConfirm = false;
     state = BrowserState::BROWSING;
     if (!result.isCancelled) {
       performSearch(std::get<KeyboardResult>(result.data).text);

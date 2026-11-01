@@ -54,6 +54,7 @@ class SecureHttpClientTransport final : public KOSyncTransport {
   const std::string& getString() const override { return bufferedBody_; }
   std::string getResponseHeader(const std::string& name) const override { return http_.getHeader(name); }
   void end() override { http_.end(); }
+  void setTimeout(unsigned long milliseconds) override { http_.setTimeout(milliseconds); }
 
  private:
   freeink::SecureHttpClient http_;

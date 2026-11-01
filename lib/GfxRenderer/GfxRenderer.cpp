@@ -427,7 +427,8 @@ static void renderCharScaled(const GfxRenderer& renderer, GfxRenderer::RenderMod
 template <TextRotation rotation = TextRotation::None>
 static void renderCharImpl(const GfxRenderer& renderer, GfxRenderer::RenderMode renderMode,
                            const EpdFontFamily& fontFamily, const uint32_t cp, int cursorX, int cursorY,
-                           const bool pixelState, const EpdFontFamily::Style style) {
+                           const bool pixelState, const EpdFontFamily::Style style,
+                           int scaleNum = 1, int scaleDen = 1, int originX = 0, int originY = 0) {
   const EpdGlyph* glyph = fontFamily.getGlyph(cp, style);
   if (!glyph) {
     LOG_ERR("GFX", "No glyph for codepoint %d", cp);
@@ -453,10 +454,16 @@ static void renderCharImpl(const GfxRenderer& renderer, GfxRenderer::RenderMode 
   } else {
     const int gx0 = cursorX + left;
     const int gy0 = cursorY - top;
-    if (!renderer.glyphIntersectsStrip(gx0, gy0, gx0 + width - 1, gy0 + height - 1)) {
+    if (!renderer.glyphIntersectsStrip(originX + gx0 * scaleNum / scaleDen, originY + gy0 * scaleNum / scaleDen,
+                                      originX + (gx0 + width - 1) * scaleNum / scaleDen,
+                                      originY + (gy0 + height - 1) * scaleNum / scaleDen)) {
       return;
     }
   }
+  const auto plot = [&](int px, int py, bool ink) {
+    if (scaleNum == scaleDen) renderer.drawPixel(originX + px, originY + py, ink);
+    else renderer.drawPixel(originX + px * scaleNum / scaleDen, originY + py * scaleNum / scaleDen, ink);
+  };
 
   const uint8_t* bitmap = renderer.getGlyphBitmap(fontData, glyph);
 
@@ -495,15 +502,15 @@ static void renderCharImpl(const GfxRenderer& renderer, GfxRenderer::RenderMode 
 
           if (renderMode == GfxRenderer::BW && bmpVal < 3) {
             // Black (also paints over the grays in BW mode)
-            renderer.drawPixel(screenX, screenY, pixelState);
+            plot(screenX, screenY, pixelState);
           } else if (renderMode == GfxRenderer::GRAYSCALE_MSB && (bmpVal == 1 || bmpVal == 2)) {
             // Light gray (also mark the MSB if it's going to be a dark gray too)
             // Dedicated X3 gray LUTs now provide proper 4-level gray on both devices
             // We have to flag pixels in reverse for the gray buffers, as 0 leave alone, 1 update
-            renderer.drawPixel(screenX, screenY, false);
+            plot(screenX, screenY, false);
           } else if (renderMode == GfxRenderer::GRAYSCALE_LSB && bmpVal == 1) {
             // Dark gray
-            renderer.drawPixel(screenX, screenY, false);
+            plot(screenX, screenY, false);
           }
         }
       }
@@ -525,7 +532,7 @@ static void renderCharImpl(const GfxRenderer& renderer, GfxRenderer::RenderMode 
           const uint8_t bit_index = 7 - (pixelPosition & 7);
 
           if ((byte >> bit_index) & 1) {
-            renderer.drawPixel(screenX, screenY, pixelState);
+            plot(screenX, screenY, pixelState);
           }
         }
       }
@@ -602,6 +609,18 @@ void GfxRenderer::drawCenteredText(const int fontId, const int y, const char* te
 
 void GfxRenderer::drawText(const int fontId, const int x, const int y, const char* text, const bool black,
                            const EpdFontFamily::Style style, const BidiUtils::BidiBaseDir baseDir) const {
+  drawTextSized(fontId, x, y, text, 0, black, style, baseDir);
+}
+
+int GfxRenderer::getTextWidthSized(int fontId, const char* text, int lineHeight, EpdFontFamily::Style style) const {
+  const int native = std::max(1, getLineHeight(fontId, text, style));
+  const int target = lineHeight > 0 ? std::min(lineHeight, native) : native;
+  return (getTextWidth(fontId, text, style) * target + native - 1) / native;
+}
+
+void GfxRenderer::drawTextSized(const int fontId, const int x, const int y, const char* text, int lineHeight,
+                               const bool black, const EpdFontFamily::Style style,
+                               const BidiUtils::BidiBaseDir baseDir) const {
   // cannot draw a NULL / empty string
   if (text == nullptr || *text == '\0') {
     return;
@@ -614,8 +633,10 @@ void GfxRenderer::drawText(const int fontId, const int x, const int y, const cha
   std::string visual;
   const char* renderedText = resolveVisualText(text, visual, baseDir);
 
-  const int yPos = y + getFontAscenderSize(resolvedFontId);
-  int lastBaseX = x;
+  const int native = std::max(1, getLineHeight(resolvedFontId));
+  const int target = lineHeight > 0 ? std::min(lineHeight, native) : native;
+  const int yPos = getFontAscenderSize(resolvedFontId);
+  int lastBaseX = 0;
   int lastBaseLeft = 0;
   int lastBaseWidth = 0;
   int lastBaseTop = 0;
@@ -652,7 +673,8 @@ void GfxRenderer::drawText(const int fontId, const int x, const int y, const cha
           combiningMark::raiseAboveBase(anchor, combiningGlyph->top, combiningGlyph->height, lastBaseTop);
       const int combiningX = combiningMark::anchorOver(anchor, lastBaseX, lastBaseLeft, lastBaseWidth,
                                                        combiningGlyph->left, combiningGlyph->width);
-      renderCharImpl<TextRotation::None>(*this, renderMode, font, cp, combiningX, yPos - raiseBy, black, style);
+      renderCharImpl<TextRotation::None>(*this, renderMode, font, cp, combiningX, yPos - raiseBy, black, style,
+                                        target, native, x, y);
       continue;
     }
 
@@ -682,9 +704,10 @@ void GfxRenderer::drawText(const int fontId, const int x, const int y, const cha
 
     if (isSupSub) {
       // yPos already carries the vertical offset applied by TextBlock::render().
-      renderCharScaled(*this, renderMode, font, cp, lastBaseX, yPos, black, style);
+      renderCharScaled(*this, renderMode, font, cp, x + lastBaseX, y + yPos, black, style);
     } else {
-      renderCharImpl<TextRotation::None>(*this, renderMode, font, cp, lastBaseX, yPos, black, style);
+      renderCharImpl<TextRotation::None>(*this, renderMode, font, cp, lastBaseX, yPos, black, style,
+                                        target, native, x, y);
     }
     prevCp = cp;
   }

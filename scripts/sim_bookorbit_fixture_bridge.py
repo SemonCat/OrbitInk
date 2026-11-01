@@ -135,7 +135,10 @@ def main() -> int:
     books = {str(b["id"]): b for b in catalog.get("books", [])}
     if method == "GET" and route == "/plugin/catalog/books" and faults.get("books_offline"):
         return finish(0)
-    if method == "GET" and route.startswith("/plugin/catalog/books/") and faults.get("fail_detail_once"):
+    if method == "GET" and route == "/plugin/catalog/books" and "author" in query and faults.get("drill_offline_once"):
+        faults.pop("drill_offline_once")
+        return finish(0)
+    if method == "GET" and route.startswith("/plugin/catalog/books/") and route.count("/") == 4 and faults.get("fail_detail_once"):
         status = int(faults.pop("fail_detail_once"))
         return finish(status, {"error": "fixture detail fault"})
     if route.startswith("/plugin/catalog") and faults.get("catalog_status"):
@@ -158,7 +161,7 @@ def main() -> int:
                 "seriesId": b.get("seriesId"), "seriesName": b.get("seriesName"),
                 "seriesIndex": b.get("seriesIndex"),
                 "progressPercentage": b.get("progressPercentage"), "lastReadAt": b.get("lastReadAt"),
-                "readStatus": b.get("readStatus"), "formats": ["epub"], "hasCover": True,
+                "readStatus": b.get("readStatus"), "formats": ["epub"], "hasCover": bool(b.get("cover")),
                 "thumbnailUrl": f"{catalog_base}/books/{b['id']}/thumbnail",
                 "detailUrl": f"{catalog_base}/books/{b['id']}",
                 "addedAt": b.get("addedAt", "2026-01-01T00:00:00.000Z"),
@@ -182,6 +185,12 @@ def main() -> int:
         return finish(200, {"pluginVersion": "fixture", "serverVersion": "fixture", "capabilities": []})
     if method == "GET" and route == "/plugin/catalog/root":
         return finish(200, {"sections": catalog.get("root", [])})
+    if method == "GET" and route.startswith("/plugin/catalog/books/") and route.endswith("/thumbnail"):
+        if faults.get("thumbnail_status"):
+            return finish(int(faults["thumbnail_status"]))
+        b = books.get(route.split("/")[-2])
+        cover = fixture / b["cover"] if b and b.get("cover") else None
+        return finish(200, raw=cover.read_bytes()) if cover and cover.is_file() else finish(404)
     if method == "GET" and route.startswith("/plugin/catalog/sections/"):
         section = route.rsplit("/", 1)[1]
         page = int((query.get("page") or ["1"])[0])

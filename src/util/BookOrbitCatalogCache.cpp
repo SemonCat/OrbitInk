@@ -14,7 +14,7 @@ namespace {
 
 constexpr char MODULE[] = "BOCache";
 constexpr uint8_t MAGIC[4] = {'B', 'O', 'C', 'C'};
-constexpr uint8_t VERSION = 2;
+constexpr uint8_t VERSION = 3;
 constexpr uint8_t KIND_ROOT = 1;
 constexpr uint8_t KIND_BOOKS = 2;
 // magic(4) version(1) owner(16) kind(1) savedAt(4) hasNext(1) count(2)
@@ -285,6 +285,7 @@ bool Cache::saveBooks(const BookOrbitCatalogClient::BookQuery& query, const Book
     const int16_t bp = b.progressPercent >= 0.0f ? static_cast<int16_t>(b.progressPercent * 100.0f + 0.5f) : -1;
     putU16(bytes, static_cast<uint16_t>(bp));
     if (!putStr(bytes, b.seriesName) || !putStr(bytes, b.seriesIndex)) return false;
+    bytes.push_back(b.hasCover ? 1 : 0);
   }
   bytes.push_back(static_cast<char>(checksum(bytes)));
   const std::string key = queryKey(query);
@@ -313,6 +314,9 @@ bool Cache::loadBooks(const BookOrbitCatalogClient::BookQuery& query, BookOrbitC
     const int16_t signedBp = static_cast<int16_t>(bp);
     b.progressPercent = signedBp >= 0 ? static_cast<float>(signedBp) / 100.0f : -1.0f;
     if (version >= 2 && (!r.str(b.seriesName) || !r.str(b.seriesIndex))) return false;
+    uint8_t cover = 0;
+    if (version >= 3 && !r.u8(cover)) return false;
+    b.hasCover = cover == 1;
     page.items.push_back(std::move(b));
   }
   out = std::move(page);

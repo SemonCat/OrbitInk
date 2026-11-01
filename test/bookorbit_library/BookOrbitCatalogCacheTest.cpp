@@ -38,6 +38,7 @@ Client::BookPage samplePage() {
   a.readStatus = "reading";
   a.seriesName = "星光圖書館";
   a.seriesIndex = "2.5";
+  a.hasCover = true;
   Client::BookSummary b;
   b.id = "102";
   b.title = "Second";
@@ -72,6 +73,8 @@ TEST_F(CatalogCacheTest, RootAndBookPagesRoundTrip) {
   EXPECT_EQ(page.total, 46u);
   EXPECT_EQ(page.items[0].seriesName, "星光圖書館");
   EXPECT_EQ(page.items[0].seriesIndex, "2.5");
+  EXPECT_TRUE(page.items[0].hasCover);
+  EXPECT_FALSE(page.items[1].hasCover);
   EXPECT_NEAR(page.items[0].progressPercent, 42.5f, 0.01f);
   EXPECT_LT(page.items[1].progressPercent, 0.0f);
 }
@@ -191,7 +194,7 @@ TEST_F(CatalogCacheTest, ExistingVersionOneBookPagesStillOpenOffline) {
     constexpr size_t headerBytes = 4 + 1 + BookOrbitOwnerId::BYTES + 1 + 4 + 1 + 2;
     bytes[4] = 1;
     bytes.erase(bytes.begin() + headerBytes, bytes.begin() + headerBytes + 4);  // v2 total
-    bytes.erase(bytes.end() - 3, bytes.end() - 1);  // v2 empty seriesName/index
+    bytes.erase(bytes.end() - 4, bytes.end() - 1);  // v2 empty seriesName/index + v3 cover hint
     uint8_t sum = 0x69;
     for (size_t i = 0; i + 1 < bytes.size(); ++i)
       sum = static_cast<uint8_t>((sum << 1 | sum >> 7) ^ bytes[i]);
@@ -204,4 +207,30 @@ TEST_F(CatalogCacheTest, ExistingVersionOneBookPagesStillOpenOffline) {
   EXPECT_EQ(loaded.items[0].title, book.title);
   EXPECT_TRUE(loaded.items[0].seriesName.empty());
   EXPECT_EQ(loaded.total, 0u);
+}
+
+TEST_F(CatalogCacheTest, ExistingVersionTwoBookPagesKeepMetadataWithoutCoverHint) {
+  Cache cache(ownerOf("alice"), &digest2);
+  Client::BookPage original;
+  original.items.push_back(samplePage().items[0]);
+  original.total = 1;
+  Client::BookQuery query;
+  ASSERT_TRUE(cache.saveBooks(query, original, 123u));
+  for (auto& [path, bytes] : testStorage().files) {
+    if (path.find(".bin") == std::string::npos) continue;
+    bytes[4] = 2;
+    bytes.erase(bytes.end() - 2);
+    uint8_t sum = 0x69;
+    for (size_t i = 0; i + 1 < bytes.size(); ++i)
+      sum = static_cast<uint8_t>((sum << 1 | sum >> 7) ^ bytes[i]);
+    bytes.back() = sum;
+  }
+  Client::BookPage loaded;
+  BookOrbitCatalogCache::Meta meta;
+  ASSERT_TRUE(cache.loadBooks(query, loaded, meta));
+  ASSERT_EQ(loaded.items.size(), 1u);
+  EXPECT_EQ(loaded.total, 1u);
+  EXPECT_EQ(loaded.items[0].seriesName, original.items[0].seriesName);
+  EXPECT_EQ(loaded.items[0].seriesIndex, "2.5");
+  EXPECT_FALSE(loaded.items[0].hasCover);
 }

@@ -1,5 +1,9 @@
 # OrbitInk — BookOrbit library redesign + KOSync product removal: PLAN
 
+Historical implementation record. The text-only presentation described here was visually
+rejected and is superseded by [the approved cover library](bookorbit-cover-library.md).
+Its protocol, migration and BookOrbit-only routing fixes remain requirements.
+
 Repo `/Users/edisonpve/Documents/code/personal/orbitink-public`, branch `bookorbit-library-20261101`,
 base `main @ 9f788995faa35854477ad2d0c21043699d362cc3` (nightly 2001). Target: X3 (528×792 1-bit
 e-paper, 4 front + 2 side buttons, no touch), zh-TW profile (Journal theme default, single 14 pt

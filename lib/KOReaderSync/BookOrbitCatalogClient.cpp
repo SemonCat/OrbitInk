@@ -151,7 +151,7 @@ constexpr size_t MAX_BOOK_DETAIL_BODY = 6144;
 // The detail's description and related-book sections are the ones that matter: they can run to
 // several KB and description precedes `files`, which a plain byte cap would cut off.
 constexpr const char* ROOT_DROPPED_KEYS[] = {"href", "booksHref", "icon", "subtitle"};
-constexpr const char* BOOKS_DROPPED_KEYS[] = {"thumbnailUrl", "detailUrl", "formats",     "hasCover",
+constexpr const char* BOOKS_DROPPED_KEYS[] = {"thumbnailUrl", "detailUrl", "formats",
                                               "addedAt",      "updatedAt", "nextUrl",     "previousUrl",
                                               "lastReadAt",   "hasPrevious", "seriesSummary"};
 constexpr const char* FACET_DROPPED_KEYS[] = {"href", "booksHref", "icon", "subtitle", "nextUrl", "previousUrl", "query"};
@@ -377,6 +377,41 @@ BookOrbitCatalogClient::Error BookOrbitCatalogClient::Session::fetchRootSections
   return result;
 }
 
+BookOrbitCatalogClient::Error BookOrbitCatalogClient::Session::fetchThumbnail(
+    const std::string& bookId, const std::string& scratchPath, const AbortCallback& shouldAbort) {
+  lastHttpCode_ = 0;
+  if (!BOOKORBIT_STORE.hasCredentials()) return NO_CREDENTIALS;
+  if (bookId.empty() || bookId.size() > 20 ||
+      bookId.find_first_not_of("0123456789") != std::string::npos || scratchPath.empty()) return BAD_REQUEST;
+  if (heapTooLowForRequest()) return LOW_MEMORY;
+  if (!transport_->begin(BOOKORBIT_STORE.getBaseUrl() + "/plugin/catalog/books/" + bookId + "/thumbnail"))
+    return BAD_REQUEST;
+  applyBookOrbitAuthHeaders(*transport_);
+  transport_->setTimeout(3000);
+  HalFile output;
+  if (!Storage.openFileForWrite("BOCover", scratchPath, output)) {
+    transport_->setTimeout(60000);
+    return FILE_ERROR;
+  }
+  size_t received = 0;
+  bool failed = false;
+  const int code = transport_->sendRequest("GET", nullptr, 0, [&](const uint8_t* bytes, size_t size) {
+    if (failed || size > 96 * 1024 - received) { failed = true; return false; }
+    received += size;
+    if (output.write(bytes, size) != size) { failed = true; return false; }
+    return true;
+  }, shouldAbort);
+  lastHttpCode_ = code;
+  const bool closed = output.close();
+  transport_->setTimeout(60000);
+  // Release TLS before image decoding on the no-PSRAM X3.
+  transport_->end();
+  Error result = categorizeStatus(code);
+  if (result == OK && (failed || !closed || !received)) result = FILE_ERROR;
+  if (result != OK) Storage.remove(scratchPath.c_str());
+  return result;
+}
+
 BookOrbitCatalogClient::Error BookOrbitCatalogClient::Session::fetchBooks(const BookQuery& query, BookPage& out,
                                                                           const AbortCallback& shouldAbort) {
   out = BookPage{};
@@ -420,6 +455,7 @@ BookOrbitCatalogClient::Error BookOrbitCatalogClient::Session::fetchBooks(const 
     if (id.empty() || !title) return;
     BookSummary book;
     book.id = id;
+    book.hasCover = entry["hasCover"] | false;
     if (entry["progressPercentage"].is<float>()) {
       const float pct = entry["progressPercentage"].as<float>();
       if (pct >= 0.0f && pct <= 100.0f) book.progressPercent = pct;

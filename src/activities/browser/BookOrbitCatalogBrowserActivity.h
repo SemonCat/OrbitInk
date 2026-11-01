@@ -9,13 +9,14 @@
 #include "util/BookOrbitCatalogBrowserPolicy.h"
 #include "util/BookOrbitCatalogCache.h"
 #include "util/BookOrbitLibraryStore.h"
+#include "util/BookOrbitCoverCache.h"
 #include "util/ButtonNavigator.h"
 
 /**
  * The single BookOrbit library (docs/bookorbit-home-library.md): BookOrbit's catalog -- root
  * sections, paged book listings with search/facet filters, book detail with read-status/rating
  * edits -- plus this account's downloaded books as the 已下載 section of that same library.
- * Button-driven, two-line rows through the theme's list component, no touch gestures.
+ * Button-driven cover/title library (docs/bookorbit-cover-library.md), no touch gestures.
  *
  * Books carry their availability: downloaded (open the local copy, offline too), downloadable,
  * or failed this session. Downloads land at an owner-scoped stable path and are indexed in the
@@ -27,12 +28,12 @@
  * user was going: the reader for 開啟閱讀, Home's 書庫 tile for Back.
  *
  * Deliberately does NOT implement (see docs/bookorbit-feature-matrix.md):
- *   - Dashboard scrollers, manifest/cursor bulk download, covers in lists.
+ *   - Dashboard scrollers, manifest/cursor bulk download.
  */
 class BookOrbitCatalogBrowserActivity final : public Activity {
  public:
   enum class BrowserState { CHECK_WIFI, WIFI_SELECTION, LOADING, BROWSING, DETAIL, DOWNLOADING, ERROR, SEARCH_INPUT,
-                            OPTIONS, READ_STATUS, RATING };
+                            OPTIONS, READ_STATUS, RATING, TOOLS };
   // Settings: the original BookOrbit settings action (Back returns there). Home / HomeSearch: the
   // BookOrbit Home's library entry points (Back returns to Home's 書庫 tile).
   enum class EntryMode { Settings, Home, HomeSearch };
@@ -86,6 +87,12 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   bool resumeRequestAfterWifi = false;
   bool currentPageHasNext = false;
   int selectorIndex = 0;
+  enum class View { Covers, Titles };
+  View view = View::Covers;
+  int browseFocus = -1;  // -1 books, 0..3 fixed tabs, 4 tools rail
+  bool enteringLibrary = true;
+  std::vector<uint8_t> coverAttempts;
+  unsigned long browseIdleAt = 0;
   uint32_t totalBooks = 0;
   uint32_t localBookCount = 0;
   std::string location;
@@ -113,6 +120,7 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   // Owner-scoped stores, created on entry when BookOrbit credentials exist (null otherwise).
   std::unique_ptr<BookOrbitLibrary::Store> library;
   std::unique_ptr<BookOrbitCatalogCache::Cache> catalogCache;
+  std::unique_ptr<BookOrbitCoverCache> coverCache;
 
   // Populated while state == DETAIL.
   BookOrbitCatalogClient::BookDetail detail;
@@ -132,6 +140,13 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   int listTop() const;
   int rowHeight() const;
   void moveSelection(int delta);
+  bool isBookBrowse() const;
+  void pageBrowse(int direction);
+  void changeTab(int tab);
+  void openTools();
+  void fetchVisibleCover();
+  void renderLibrary();
+  void renderCover(const BookOrbitCatalogClient::BookSummary& book, int x, int y, int width, int height);
   void applyChoice();
   void returnFromDetail();
 

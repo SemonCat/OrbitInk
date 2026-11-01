@@ -44,6 +44,7 @@ class KOSyncTransport {
 
   // Closes the connection (if any) held open for reuse. Safe to call even if nothing is open.
   virtual void end() = 0;
+  virtual void setTimeout(unsigned long /*milliseconds*/) {}
 
   // True if this transport keeps the underlying connection open across begin()/sendRequest()
   // pairs for identical scheme://host:port, reusing the TLS session instead of paying a fresh

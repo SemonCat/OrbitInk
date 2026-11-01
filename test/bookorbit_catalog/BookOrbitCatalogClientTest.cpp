@@ -67,11 +67,13 @@ class FakeKOSyncTransport final : public KOSyncTransport {
 
   const std::string& getString() const override { return lastBody_; }
   void end() override {}
+  void setTimeout(unsigned long ms) override { timeouts.push_back(ms); }
 
   size_t chunkSize = 0;
   std::vector<std::string> urls;
   std::vector<RecordedRequest> requests;
   std::vector<std::pair<std::string, std::string>> headers;
+  std::vector<unsigned long> timeouts;
 
  private:
   std::vector<ScriptedResponse> responses_;
@@ -97,6 +99,39 @@ class BookOrbitCatalogClientTest : public ::testing::Test {
     testStorage().reset();
   }
 };
+
+TEST_F(BookOrbitCatalogClientTest, ThumbnailStreamsBoundedBinaryToScratchAndRestoresTimeout) {
+  FakeKOSyncTransport* fake = nullptr;
+  const std::string binary("PNG\0\xff", 5);
+  auto session = makeJsonSession({{200, binary}}, &fake);
+  fake->chunkSize = 2;
+  ASSERT_EQ(session->fetchThumbnail("224", "/cover/download.tmp"), Client::OK);
+  EXPECT_EQ(fake->urls.front(), "https://books.example.test/api/v1/koreader/plugin/catalog/books/224/thumbnail");
+  EXPECT_EQ(testStorage().files["/cover/download.tmp"], std::vector<uint8_t>(binary.begin(), binary.end()));
+  EXPECT_EQ(fake->timeouts, (std::vector<unsigned long>{3000, 60000}));
+  EXPECT_FALSE(fake->headers.empty());
+}
+
+TEST_F(BookOrbitCatalogClientTest, ThumbnailRejectsUrlInjectionWithoutRequest) {
+  FakeKOSyncTransport* fake = nullptr;
+  auto session = makeJsonSession({}, &fake);
+  for (const char* id : {"", "../1", "1?url=https://evil.invalid", "123456789012345678901", "//evil"})
+    EXPECT_EQ(session->fetchThumbnail(id, "/scratch"), Client::BAD_REQUEST);
+  EXPECT_TRUE(fake->urls.empty());
+}
+
+TEST_F(BookOrbitCatalogClientTest, ThumbnailCapShortWriteCloseAndHttpFailureNeverLeavePartialScratch) {
+  for (int scenario = 0; scenario < 5; ++scenario) {
+    testStorage().reset();
+    auto session = makeJsonSession({{scenario == 3 ? 404 : 200,
+                                    scenario == 0 ? std::string(96 * 1024 + 1, 'x') :
+                                    scenario == 4 ? "" : "image"}});
+    testStorage().failWrites = scenario == 1;
+    testStorage().failFlush = scenario == 2;
+    EXPECT_NE(session->fetchThumbnail("224", "/scratch"), Client::OK);
+    EXPECT_EQ(testStorage().files.count("/scratch"), 0u) << scenario;
+  }
+}
 
 // ---- fetchRootSections ---------------------------------------------------------------------
 

@@ -8,7 +8,7 @@ BookOrbit library browsing screens on [env:simulator_x3_zh_tw], against the FIXT
         --flows before --keep /tmp/shots                            # baseline capture only
 
 Drives the production library through scripted X3 button presses (no touch) and captures the
-root, book list, sort/filter, search, detail, empty, error and loading screens. Every byte comes
+cover/title/Reading books, tools, sort/filter, search, detail, empty, error and offline screens. Every byte comes
 from a synthetic fixture (invented Traditional Chinese / mixed-script titles, no real library or
 account) served by scripts/sim_bookorbit_fixture_bridge.py, which never opens a socket.
 
@@ -290,171 +290,306 @@ def main() -> int:
 
 
 def after_suite(args, fx, state, flog, failures):
+    from PIL import Image, ImageDraw
+    import hashlib
+    import zipfile
+    from sim_bookorbit_library_geometry import assert_composition
     shots = []
+    geometry = []
     active = True
 
-    def need(_failures, cond, msg):
+    def need(cond, msg):
         if active:
             home.need(failures, cond, msg)
 
-    def down(flow, n):
+    def steps(f, key, n):
         for _ in range(n):
-            flow.press("DOWN", 350)
-        return flow
+            f.press(key, 350)
+        return f
 
-    def all_books():
-        return down(Flow().press("ENTER").wait(1200), 3).press("ENTER").wait(800)
+    def enter():
+        return Flow().press('ENTER').wait(1400)
 
-    def run(name, flow, faults=None, fixture=None):
+    def tool(f, index):
+        return steps(f.press('BACK'), 'DOWN', index).press('ENTER').wait(500)
+
+    def tab(f, index):
+        # First book -> tools rail -> last tab -> chosen tab; Confirm then back to books.
+        steps(f, 'LEFT', 5-index).press('ENTER').wait(650)
+        return steps(f, 'RIGHT', 5-index)
+
+    def sort_author(f):
+        return tool(f, 2).press('DOWN').press('ENTER').wait(650)
+
+    def finish_book(f):
+        f.press('ENTER').wait(600).press('DOWN').press('ENTER')
+        steps(f, 'UP', 5)
+        return steps(f, 'DOWN', 4).press('ENTER').wait(600).press('BACK').wait(650)
+
+    def gets(routes):
+        return [(q, status) for method, path, q, status in routes if method == 'GET' and path == '/plugin/catalog/books']
+
+    def details(routes):
+        return [r for r in routes if r[0] == 'GET' and r[1].startswith('/plugin/catalog/books/') and r[1].count('/') == 4]
+
+    def run(name, f, faults=None, fixture=None, make=None):
         nonlocal active
-        active = not args.only or name in args.only.split(",")
+        active = not args.only or name in args.only.split(',')
         if not active:
-            return "", []
-        log, reqs, images = run_flow(args, name, fixture or fx, state, flog, flow, failures, faults)
+            return '', []
+        log, reqs, images = run_flow(args, name, fixture or fx, state, flog, f, failures, faults, make)
         shots.extend(images)
         routes = catalog_requests(reqs)
-        for method, route, query, status in routes:
-            print(f"  [{name}] {method} {route} {query} -> {status}")
-        need(failures, all(r["path"].startswith("/api/v1/koreader/") for r in reqs),
-                  f"{name}: request outside BookOrbit")
+        for method, path, q, status in routes:
+            print(f'  [{name}] {method} {path} {q} -> {status}')
+        need(all(r['path'].startswith('/api/v1/koreader/') for r in reqs), name + ': escaped fixture origin')
+        need('Outside range' not in log, name + ': renderer wrote beyond panel')
+        for path, _ in images:
+            if path.exists():
+                Image.open(path).save(path.with_suffix('.png'))
         return log, routes
 
-    def book_gets(routes):
-        return [(query, status) for method, route, query, status in routes
-                if method == "GET" and route == "/plugin/catalog/books"]
+    def check(name, filename, mode, count=6, selected=0):
+        if active:
+            path = Path(args.keep)/name/'shots'/filename
+            try:
+                geometry.append(assert_composition(path, mode, count, selected))
+            except (AssertionError, OSError) as e:
+                failures.append(f'{name}: {e}')
 
-    # Root, long mixed-script rows, automatic paging, and Back = parent (not previous page).
-    f = Flow().press("ENTER").wait(1200).shot("after-01-root.bmp", "localized root with visible search and local books")
-    down(f, 3).press("ENTER").wait(800).shot("after-02-books.bmp", "title / author / status, list context and position")
-    down(f, 21).wait(800).shot("after-03-page2.bmp", "page 2 reached by crossing the list edge")
-    f.press("UP").wait(800).shot("after-04-page1-tail.bmp", "previous page restores its last row")
-    f.press("BACK").wait(800).shot("after-05-back-root.bmp", "Back returns to the root with All books selected")
-    f.press("ENTER").wait(800)
-    _, routes = run("browse", f)
-    need(failures, [q.get("page") for q, status in book_gets(routes)] == ["1", "2", "1", "1"],
-              "browse: page traversal or parent Back changed")
+    # Fixtures are synthetic, but travel through the real authenticated endpoint, decoder,
+    # atomic cache and renderer. Cover imagery is deliberately independent of product code.
+    visual = fx.parent/'visual'
+    visual.mkdir(exist_ok=True)
+    shutil.copy2(fx/'book.epub', visual/'book.epub')
+    names = ['小王子', '深度工作力', '原子習慣', '人類大歷史：從野獸到扮演上帝', '解憂雜貨店', '被討厭的勇氣']
+    authors = ['聖修伯里', '卡爾紐波特', '詹姆斯克利爾', '哈拉瑞', '東野圭吾', '岸見一郎、古賀史健']
+    visual_books = []
+    for i in range(7):
+        im = Image.new('L', (240, 360), 255)
+        d = ImageDraw.Draw(im)
+        d.rectangle((1, 1, 238, 358), outline=0, width=4)
+        d.line((16, 1, 16, 358), fill=0, width=2)
+        for j in range(i % 3 + 1):
+            d.ellipse((35+j*20, 180-j*35, 200-j*15, 320-j*35), outline=0, width=5)
+        for j in range(3):
+            d.line((35, 40+j*24, 205-j*20, 40+j*24), fill=0, width=7)
+        cover = f'cover{i}.jpg' if i % 2 else f'cover{i}.png'
+        im.save(visual/cover)
+        visual_books.append({'id': i+1, 'title': names[i] if i < 6 else '龜的第七本書', 'authors': [authors[i] if i < 6 else '作者'],
+                             'readStatus': 'reading' if i in (0, 4) else 'read' if i == 2 else 'unread',
+                             'progressPercentage': 32 if i == 0 else 18 if i == 4 else None,
+                             'cover': cover, 'files': [{'id': 8000+i, 'format':'epub', 'file':'book.epub'}]})
+    catalog = {'root': ROOT, 'books': visual_books[:6]}
+    (visual/'catalog.json').write_text(json.dumps(catalog, ensure_ascii=False))
 
-    # Select sort and filter explicitly, make one status write, then return to the same query.
-    f = all_books().press("ENTER").shot("after-06-options.bmp", "explicit sort / status choices with current markers")
-    down(f, 1).press("ENTER").wait(700).shot("after-07-author-sort.bmp", "author sort with long CJK and mixed titles")
-    f.press("ENTER")
-    down(f, 8).press("ENTER").wait(700).shot("after-08-filter.bmp", "reading filter retained on the list")
-    f.press("DOWN").press("ENTER").wait(700).shot("after-09-detail.bmp", "detail with title, series, status, EPUB size and actions")
-    f.press("DOWN").press("ENTER").shot("after-10-status-choices.bmp", "one explicit status selection, no cycling writes")
-    # Current book is reading / on_hold; either way the first UP presses clamp at Unread.
-    for _ in range(5): f.press("UP", 300)
-    down(f, 4).press("ENTER").wait(700).press("BACK").wait(700).shot("after-11-edited-filter.bmp", "edited book removed from reading filter")
-    _, routes = run("choices", f)
-    gets = book_gets(routes)
-    need(failures, bool(gets) and gets[-1][0].get("sort") == "author" and gets[-1][0].get("readStatus") == "reading",
-              "choices: detail Back lost sort or filter")
-    writes = [r for r in routes if r[0] == "PUT"]
-    need(failures, len(writes) == 1 and writes[0][1].endswith("/read-status") and writes[0][3] == 200,
-              "choices: status choice must issue exactly one successful write")
-    need(failures, list((json.loads(state.read_text()) if state.exists() else {}).get("statuses", {}).values()) == ["read"],
-              "choices: selected Finished status did not persist")
+    f = enter().shot('01-cover-library.bmp', 'A: actual firmware, six real endpoint thumbnails')
+    tool(f, 0).shot('02-title-library.bmp', 'B: actual firmware, title first and compact thumbnails')
+    tool(f, 0)
+    tab(f, 1)
+    f.press('ENTER').wait(500).press('ENTER').wait(800).press('BACK').wait(500)
+    f.press('RIGHT').press('ENTER').wait(500).press('ENTER').wait(800).press('BACK').wait(500).press('LEFT')
+    f.shot('03-reading.bmp', 'C: actual firmware, two downloaded Reading cards with progress and offline availability')
+    f.press('LEFT').shot('04-tools-focus.bmp', 'explicit tools rail focus')
+    f.press('LEFT').shot('05-tab-focus.bmp', 'explicit fixed tab focus')
+    f.press('BACK').shot('06-tools.bmp', 'reachable tools and Exit')
+    _, routes = run('visual', f, fixture=visual)
+    check('visual', '01-cover-library.bmp', 'covers')
+    check('visual', '02-title-library.bmp', 'titles')
+    check('visual', '03-reading.bmp', 'reading', 2)
+    need(len([r for r in routes if r[1].endswith('/thumbnail')]) == 6, 'visual: cover/title/filter change re-fetched cached images')
+    if active:
+        cache = list((Path(args.keep)/'visual/fs_/.crosspoint/bookorbit').glob('lib_*/covers/*.bmp'))
+        need(len(cache) == 6 and all(p.stat().st_size <= 3000 for p in cache), 'visual: bounded decoded cover cache missing')
 
-    # The status PUT succeeds, but the refresh GET fails and reloads the pre-edit cached page.
-    # Reopen the selected row to prove that the edited book is no longer in the Reading filter.
-    f = all_books().press("ENTER")
-    down(f, 1).press("ENTER").press("ENTER")
-    down(f, 8).press("ENTER").press("DOWN").press("ENTER").wait(700)
-    f.press("DOWN").press("ENTER")
-    for _ in range(5): f.press("UP", 300)
-    down(f, 4).press("ENTER").wait(700).press("BACK").wait(700)
-    f.shot("after-31-edited-offline-filter.bmp", "confirmed Finished edit removed from cached Reading filter")
-    f.press("ENTER").wait(700).shot("after-32-offline-remaining-detail.bmp", "remaining Reading book is selectable after cache reconciliation")
-    _, routes = run("status-refresh-offline", f, {"books_offline_after_status": True})
-    gets = book_gets(routes)
-    need(failures, bool(gets) and gets[-1][0].get("sort") == "author" and
-         gets[-1][0].get("readStatus") == "reading" and gets[-1][1] == 0,
-         "status-refresh-offline: refresh must fail with the original sort and Reading filter")
-    writes = [r for r in routes if r[0] == "PUT" and r[1].endswith("/read-status")]
-    details = [r for r in routes if r[0] == "GET" and r[1].startswith("/plugin/catalog/books/")]
-    need(failures, len(writes) == 1 and writes[0][3] == 200 and
-         len(details) == 2 and all(r[3] == 200 for r in details) and details[0][1] != details[1][1],
-         "status-refresh-offline: cached list retained the edited book under Reading")
-    need(failures, list((json.loads(state.read_text()) if state.exists() else {}).get("statuses", {}).values()) == ["read"],
-         "status-refresh-offline: confirmed Finished status was lost")
+    # 0 / 1 / 6 / 7 cardinalities; side key must reach the seventh, never manufacture empty slots.
+    for cardinality in (0, 1, 6, 7):
+        variant = fx.parent/f'cardinality-{cardinality}'
+        shutil.copytree(visual, variant, dirs_exist_ok=True)
+        (variant/'catalog.json').write_text(json.dumps({'root':ROOT, 'books':visual_books[:cardinality]}, ensure_ascii=False))
+        f = enter().shot('first.bmp', f'{cardinality} books, first screen')
+        if cardinality == 7:
+            f.press('DOWN').wait(650).shot('second.bmp','seventh book, side-key next page')
+            f.press('ENTER').wait(600).shot('detail.bmp','seventh book opens')
+            f.press('BACK').press('UP').wait(600).shot('previous.bmp','side-key previous page')
+        _, routes = run(f'cardinality-{cardinality}', f, fixture=variant)
+        check(f'cardinality-{cardinality}', 'first.bmp', 'covers', min(cardinality,6))
+        if cardinality == 7:
+            check('cardinality-7', 'second.bmp', 'covers', 1)
+            need(any(r[1] == '/plugin/catalog/books/7' for r in details(routes)), 'seventh book inaccessible')
 
-    # A request failure at the page edge keeps page 1, its selection and Back stack intact.
-    f = all_books()
-    down(f, 21).wait(700).shot("after-12-page-error.bmp", "page request failed: loaded rows and selection remain")
-    f.press("UP", 350).press("DOWN", 350).press("DOWN").wait(700).shot("after-13-page-retry.bmp", "moving across the same edge retries page 2")
-    _, routes = run("page-failure", f, {"fail_page_once": 2})
-    need(failures, [(q.get("page"), status) for q, status in book_gets(routes)] ==
-              [("1", 200), ("2", 0), ("2", 200)], "page-failure: failed paging lost position or could not retry")
+    # Long CJK/Latin titles, query preservation and selected-book preservation across view/detail.
+    f = sort_author(enter()).press('RIGHT').press('RIGHT').press('ENTER').wait(600)
+    f.press('BACK').wait(400)
+    tool(f, 0).shot('long-titles.bmp','long unspaced CJK and Latin titles, two lines')
+    f.press('ENTER').wait(600).press('BACK')
+    _, routes = run('long-titles', f)
+    need(len(details(routes)) == 2 and details(routes)[0][1] == details(routes)[1][1], 'view switch lost selected book')
+    check('long-titles','long-titles.bmp','titles',selected=2)
 
-    f = down(Flow().press("ENTER").wait(1200), 6).press("ENTER").wait(700).shot("after-14-series.bmp", "series facets with counts")
-    f.press("ENTER").wait(700).shot("after-15-series-books.bmp", "series breadcrumb and filtered books")
-    _, routes = run("series", f)
-    need(failures, any(q.get("seriesId", "").isdigit() and status == 200 for q, status in book_gets(routes)),
-              "series: drill-in must use the server numeric seriesId")
+    # Keep the exact prior PUT-success / GET-offline regression: remaining Reading book224.
+    f = tab(sort_author(enter()), 1)
+    finish_book(f).shot('edited-offline.bmp','confirmed Finished removed from stale cached Reading page')
+    f.press('ENTER').wait(650).shot('remaining-detail.bmp','remaining selected detail must be book224')
+    _, routes = run('status-refresh-offline', f, {'books_offline_after_status':True})
+    need([r[1] for r in details(routes)] == ['/plugin/catalog/books/208','/plugin/catalog/books/224'], 'offline refresh did not retain remaining book224')
+    need(len([r for r in routes if r[0]=='PUT' and r[1].endswith('/read-status') and r[3]==200]) == 1, 'status requires one PUT')
+    need(bool(gets(routes)) and gets(routes)[-1][1] == 0 and gets(routes)[-1][0].get('sort') == 'author' and gets(routes)[-1][0].get('readStatus') == 'reading', 'refresh lost query or did not hit transport failure')
 
-    f = down(Flow().press("ENTER").wait(1200), 8).press("ENTER").wait(700).shot("after-16-collections.bmp", "countless facets do not claim 0 books")
-    f.press("DOWN").press("ENTER").wait(700).shot("after-17-empty.bmp", "contextual empty list keeps options available")
-    run("empty", f)
+    # Side paging within and across 20-book server pages; failed next request never commits.
+    f = steps(enter(),'DOWN',4).shot('page-failed.bmp','failed server page keeps last loaded screen')
+    f.press('DOWN').wait(650).shot('page-retry.bmp','same edge retries page 2').press('UP').wait(650)
+    _, routes = run('page-failure', f, {'fail_page_once':2})
+    need([(q.get('page'),s) for q,s in gets(routes)] == [('1',200),('2',0),('2',200),('1',200)], 'page failure committed or lost retry')
 
-    f = all_books().press("DOWN").press("ENTER").wait(700).shot("after-27-detail-error.bmp", "detail request rejection with Retry")
-    f.press("ENTER").wait(700).shot("after-28-detail-retry.bmp", "Retry requests the same book detail")
-    f.press("BACK").wait(700)
-    _, routes = run("detail-failure", f, {"fail_detail_once": 400})
-    details = [r for r in routes if r[0] == "GET" and r[1].startswith("/plugin/catalog/books/")]
-    need(failures, len(details) == 2 and [r[3] for r in details] == [400, 200] and details[0][1] == details[1][1],
-         "detail-failure: Retry must repeat the same detail request")
-
-    many = fx.parent / "many-authors"
+    # Numeric series, all 60 facets and drill Retry must use page1, not parent page2.
+    f = steps(tool(enter(),4),'DOWN',6).press('ENTER').wait(600).shot('series.bmp','series facets')
+    f.press('ENTER').wait(600).shot('series-books.bmp','numeric series drill-in')
+    _, routes = run('series', f)
+    need(any(q.get('seriesId','').isdigit() and s==200 for q,s in gets(routes)), 'series id is not numeric')
+    many = fx.parent/'many-authors'
     many.mkdir(exist_ok=True)
-    shutil.copy2(fx / "book.epub", many / "book.epub")
-    catalog = json.loads((fx / "catalog.json").read_text())
-    catalog["books"] = [{"id": 701 + i, "title": f"Fixture book {i:03d}", "authors": [f"Author {i:03d}"],
-                         "files": [{"id": 9000 + i, "format": "epub", "file": "book.epub"}]} for i in range(61)]
-    (many / "catalog.json").write_text(json.dumps(catalog))
-    f = down(Flow().press("ENTER").wait(1200), 5).press("ENTER").wait(700)
-    down(f, 60).wait(700).press("ENTER").wait(700).shot("after-29-drill-error.bmp", "failed drill-in from facet page 2")
-    f.press("ENTER").wait(700).shot("after-30-drill-retry.bmp", "Retry loads the requested first book page")
-    _, routes = run("drill-failure", f, {"fail_once": "/plugin/catalog/books"}, many)
-    need(failures, [(q.get("page"), status) for q, status in book_gets(routes)] == [("1", 0), ("1", 200)],
-         "drill-failure: Retry inherited the parent facet page")
+    shutil.copy2(fx/'book.epub', many/'book.epub')
+    many_books = [{'id':701+i,'title':f'Fixture book {i:03d}','authors':[f'Author {i:03d} '+('關於星光圖書館的作者與漫長旅程'*2)],
+                   'files':[{'id':9000+i,'format':'epub','file':'book.epub'}]} for i in range(61)]
+    (many/'catalog.json').write_text(json.dumps({'root':ROOT,'books':many_books},ensure_ascii=False))
+    f = steps(tool(enter(),4),'DOWN',5).press('ENTER').wait(600)
+    steps(f,'DOWN',60).press('ENTER').wait(600).shot('drill-error.bmp','drill from facet page2 rejected')
+    f.press('ENTER').wait(600).shot('drill-retry.bmp','Retry uses requested book page1')
+    _, routes = run('drill-failure',f,{'drill_offline_once':True},many)
+    need(any(r[1]=='/plugin/catalog/sections/authors' and r[2].get('page')=='2' for r in routes),'facet60 page2 unreachable')
+    need([(q.get('page'),s) for q,s in gets(routes)] == [('1',200),('1',0),('1',200)], 'drill inherited parent page or did not Retry')
 
-    # QWERTY, physical buttons only: type 1, then bottom-row OK. No Chinese input is implied.
-    f = Flow().press("ENTER").wait(1200).press("ENTER").wait(700).shot("after-18-search-keyboard.bmp", "search via the visible root row")
-    f.press("ENTER")
-    down(f, 4)
-    for _ in range(2): f.press("RIGHT", 350)
-    f.press("ENTER").wait(700).shot("after-19-search-results.bmp", "search results retain the query and an empty-state explanation")
-    _, routes = run("search", f)
-    need(failures, any(q.get("q") == "1" and status == 200 for q, status in book_gets(routes)),
-              "search: keyboard submit did not issue the expected search")
+    f = enter().press('ENTER').wait(600).shot('detail-error.bmp','detail error with Retry')
+    f.press('ENTER').wait(600).shot('detail-retry.bmp','same detail after Retry')
+    _, routes = run('detail-failure',f,{'fail_detail_once':400})
+    need([r[3] for r in details(routes)] == [400,200] and len({r[1] for r in details(routes)})==1,'detail Retry changed request')
 
-    f = all_books().press("ENTER")
-    down(f, 1).press("ENTER").press("ENTER")
-    down(f, 8).press("ENTER").press("ENTER")
-    down(f, 10).press("ENTER").wait(500).press("ENTER")
-    down(f, 4)
-    for _ in range(2): f.press("RIGHT", 350)
-    f.press("ENTER").wait(700).shot("after-25-scoped-search.bmp", "search preserves author sort and reading filter")
-    f.press("BACK").wait(700).shot("after-26-search-back.bmp", "Back restores the parent query and selection")
-    _, routes = run("scoped-search", f)
-    gets = book_gets(routes)
-    need(failures, any(q.get("q") == "1" and q.get("sort") == "author" and
-                       q.get("readStatus") == "reading" for q, status in gets), "scoped-search: lost list filters")
-    need(failures, bool(gets) and gets[-1][0].get("sort") == "author" and
-         gets[-1][0].get("readStatus") == "reading" and "q" not in gets[-1][0], "scoped-search: Back lost parent query")
+    # Scoped search via physical keyboard, then explicit parent action restores filters.
+    f = tool(tab(sort_author(enter()),1),1).shot('search-keyboard.bmp','physical keyboard')
+    f.press('ENTER')
+    steps(f,'DOWN',4)
+    steps(f,'RIGHT',2).press('ENTER').wait(650).shot('search-results.bmp','scoped search')
+    tool(f,5).shot('search-parent.bmp','explicit parent restores query')
+    _, routes = run('scoped-search',f)
+    need(any(q.get('q')=='1' and q.get('sort')=='author' and q.get('readStatus')=='reading' for q,s in gets(routes)),'scoped search lost filters')
+    need(bool(gets(routes)) and 'q' not in gets(routes)[-1][0] and gets(routes)[-1][0].get('readStatus')=='reading','search parent lost scope')
 
-    # Download/index/local-row state, then explicit rating (one write) and Back restoration.
-    f = all_books().press("DOWN").press("ENTER").wait(700).press("ENTER").wait(1800).shot("after-20-downloaded.bmp", "download complete, Open book focused")
-    down(f, 3).press("ENTER")
-    down(f, 5).press("ENTER").wait(700).press("BACK").wait(700).shot("after-21-local-row.bmp", "downloaded marker after returning to the list")
-    _, routes = run("download", f)
-    need(failures, any(r[1].endswith("/download") and r[3] == 200 for r in routes), "download: no successful file transfer")
-    need(failures, len([r for r in routes if r[0] == "PUT" and r[1].endswith("/rating")]) == 1,
-              "download: rating selection did not issue exactly one write")
+    # Download detail is the confirmation; a second Confirm downloads. Rating is one write.
+    f = enter().press('ENTER').wait(600).shot('download-confirm.bmp','detail confirms download and size')
+    f.press('ENTER').wait(1000).shot('downloaded.bmp','Open local focused after download')
+    steps(f,'DOWN',3).press('ENTER')
+    steps(f,'DOWN',5).press('ENTER').wait(600).press('BACK').wait(600).shot('local-book.bmp','per-book local availability')
+    _, routes = run('download',f)
+    need(any(r[1].endswith('/download') and r[3]==200 for r in routes),'download did not complete')
+    need(len([r for r in routes if r[0]=='PUT' and r[1].endswith('/rating')])==1,'rating did not issue exactly one write')
 
-    run("offline", Flow().press("ENTER").wait(1400).shot("after-22-offline.bmp", "offline library retains local entry"), {"offline": True})
-    run("error", Flow().press("ENTER").wait(1400).shot("after-23-error.bmp", "localized server rejection with Retry"), {"catalog_status": 400})
-    f = down(Flow().press("ENTER").wait(4000), 3).press("ENTER", 350).shot("after-24-loading.bmp", "catalog loading retains library context").wait(2200)
-    run("loading", f, {"delay_ms": 1500})
+    # Missing/error/unsupported/oversized images must retain the six-book composition and access.
+    for name, faults in [('missing',None),('cover-error',{'thumbnail_status':500})]:
+        variant = visual
+        if name == 'missing':
+            variant = fx.parent/'missing';shutil.copytree(visual,variant,dirs_exist_ok=True)
+            b = json.loads((variant/'catalog.json').read_text())
+            for row in b['books']:row.pop('cover',None)
+            (variant/'catalog.json').write_text(json.dumps(b,ensure_ascii=False))
+        f = enter().shot('covers.bmp', name+' placeholders').press('ENTER').wait(600).shot('detail.bmp','book access independent of covers')
+        _, routes = run(name,f,faults,variant)
+        check(name,'covers.bmp','covers')
+        need(len(details(routes))==1 and details(routes)[0][3]==200,name+': failed cover blocked detail')
+
+    # Bad media stays optional, including valid but unsupported formats and dimension bombs.
+    for name in ('invalid-cover', 'oversize-cover', 'body-limit', 'webp-cover', 'progressive-cover'):
+        variant = fx.parent/name
+        shutil.copytree(visual,variant,dirs_exist_ok=True)
+        payload = variant/'media.bin'
+        if name == 'invalid-cover': payload.write_bytes(b'<html>server error</html>'*4)
+        elif name == 'oversize-cover': payload.write_bytes(fixture_epub.png_cover(513,769))
+        elif name == 'body-limit': payload.write_bytes(b'x'*(96*1024+1))
+        elif name == 'webp-cover': Image.new('RGB',(120,180),'gray').save(payload,format='WEBP')
+        else: Image.new('RGB',(120,180),'gray').save(payload,format='JPEG',progressive=True)
+        b = json.loads((variant/'catalog.json').read_text())
+        for row in b['books']: row['cover']='media.bin'
+        (variant/'catalog.json').write_text(json.dumps(b,ensure_ascii=False))
+        _,routes=run(name,enter().wait(1200).shot('covers.bmp',name+' fallback').press('ENTER').wait(600),fixture=variant)
+        check(name,'covers.bmp','covers')
+        need(len(details(routes))==1 and details(routes)[0][3]==200,name+': blocked book access')
+        if active:
+            cache=Path(args.keep)/name/'fs_/.crosspoint/bookorbit'
+            need(not list(cache.glob('lib_*/covers/*.bmp')),name+': invalid media promoted')
+            need(not list(cache.glob('lib_*/covers/*.tmp')),name+': partial media left behind')
+
+    f=tab(enter(),1)
+    tab(f,2).shot('unread.bmp','fixed Unread tab')
+    tab(f,3).shot('finished.bmp','fixed Finished tab')
+    tab(f,0).shot('all.bmp','fixed All tab')
+    _,routes=run('status-tabs',f)
+    need([q.get('readStatus','') for q,s in gets(routes)]==['','reading','unread','finished',''],'fixed tabs did not send the exact status filters')
+
+    # Existing repository image assets are extracted byte-for-byte, never normalized.
+    original=fx.parent/'original-media';shutil.copytree(visual,original,dirs_exist_ok=True)
+    manifest=[]
+    original_books=json.loads((original/'catalog.json').read_text())
+    for i,(epub,member) in enumerate([('test_jpeg_images.epub','OEBPS/images/grayscale_test.jpg'),
+                                     ('test_png_images.epub','OEBPS/images/grayscale_test.png')]):
+        source=REPO_ROOT/'test/epubs'/epub
+        with zipfile.ZipFile(source) as z: data=z.read(member)
+        dest=original/Path(member).name;dest.write_bytes(data)
+        original_books['books'][i]['cover']=dest.name
+        manifest.append({'source':str(source),'archive_member':member,'bytes':len(data),
+                         'sha256':hashlib.sha256(data).hexdigest(),'dimensions':list(Image.open(dest).size)})
+    (original/'catalog.json').write_text(json.dumps(original_books,ensure_ascii=False))
+    run('original-media',enter().wait(1000).shot('covers.bmp','unmodified repository JPEG and PNG image consumers'),fixture=original)
+    check('original-media','covers.bmp','covers')
+    if active:
+        (Path(args.keep)/'original-media/manifest.json').write_text(json.dumps(manifest,indent=2))
+        need(len(list((Path(args.keep)/'original-media/fs_/.crosspoint/bookorbit').glob('lib_*/covers/*.bmp')))==6,
+             'original media: one of the six supported images failed to decode')
+
+    # Offline cache reuse: preserve the actual first run's owner-scoped BMPs and catalog.
+    def cached_sd(work):
+        shutil.copytree(Path(args.keep)/'visual/fs_',work/'fs_');(work/'shots').mkdir()
+    _, routes = run('cached-offline',enter().shot('offline.bmp','offline catalog with reused decoded covers'),{'offline':True},visual,cached_sd)
+    check('cached-offline','offline.bmp','covers')
+    need(not any(r[1].endswith('/thumbnail') for r in routes),'offline cover path attempted network')
+    def interrupted_cache(work):
+        cached_sd(work)
+        directory = next((work/'fs_/.crosspoint/bookorbit').glob('lib_*/covers'))
+        for book_id in ('1', '2'):
+            live = directory/f'{book_id}.bmp'
+            shutil.copy2(live, live.with_suffix('.bmp.bak'))
+            live.with_suffix('.bmp.tmp').write_bytes(b'partial image')
+        (directory/'1.bmp').unlink()  # power loss after staging old live aside
+        (directory/'download.tmp').write_bytes(b'partial network response')
+    run('cache-recovery',enter().shot('offline.bmp','offline cache recovered after interrupted promotion'),
+        {'offline':True},visual,interrupted_cache)
+    check('cache-recovery','offline.bmp','covers')
+    if active:
+        directory=next((Path(args.keep)/'cache-recovery/fs_/.crosspoint/bookorbit').glob('lib_*/covers'))
+        need(len(list(directory.glob('*.bmp')))==6 and not list(directory.glob('*.tmp')) and
+             not list(directory.glob('*.bak')),'interrupted cover cache did not recover atomically')
+        original=next((Path(args.keep)/'visual/fs_/.crosspoint/bookorbit').glob('lib_*/covers'))
+        need(all((directory/f'{i}.bmp').read_bytes()==(original/f'{i}.bmp').read_bytes() for i in (1,2)),
+             'interrupted promotion changed a complete cover')
+    def full_cache(work):
+        cached_sd(work)
+        directory=next((work/'fs_/.crosspoint/bookorbit').glob('lib_*/covers'))
+        template=(directory/'1.bmp').read_bytes()
+        for p in directory.glob('*.bmp'):p.unlink()
+        for i in range(100,148):(directory/f'{i}.bmp').write_bytes(template)
+    run('cache-limit',enter().wait(1200).shot('covers.bmp','bounded cache replaces only owned numeric thumbnails'),
+        fixture=visual,make=full_cache)
+    check('cache-limit','covers.bmp','covers')
+    if active:
+        directory=next((Path(args.keep)/'cache-limit/fs_/.crosspoint/bookorbit').glob('lib_*/covers'))
+        need(len(list(directory.glob('*.bmp')))==48,'cover cache exceeded 48 live thumbnails')
+        need(all((directory/f'{i}.bmp').exists() for i in range(1,7)),'visible covers not retained under cache pressure')
+    run('offline-empty',enter().shot('offline.bmp','offline without catalog: downloaded view remains usable'),{'offline':True})
+    run('error',enter().shot('error.bmp','server rejection and Retry'),{'catalog_status':400})
+
+    # Exit is reachable using front/side buttons; final active activity is Home.
+    log,_ = run('exit',tool(enter(),7).wait(600).shot('home.bmp','Exit returns to Home'))
+    need(log.count('Entering activity: Home') >= 2,'Exit did not return Home')
+    (Path(args.keep)/'geometry.json').write_text(json.dumps(geometry,indent=2))
     return shots
 
 
