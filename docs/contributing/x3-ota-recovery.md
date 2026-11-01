@@ -129,7 +129,7 @@ image. Build2101 also contains the old downloader.
 The already published build2101 artifact recorded for this incident is:
 
 ```text
-https://github.com/SemonCat/BookOrbit-X3/releases/download/orbitink-b2101/firmware.bin
+https://github.com/SemonCat/OrbitInk/releases/download/orbitink-b2101/firmware.bin
 size:   5907424 bytes
 sha256: 1d67a3cc4c41421616f178114c6438ef87b586fa1c1fa0c54c9c2f24bea29de6
 ```
