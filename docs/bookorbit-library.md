@@ -156,7 +156,10 @@ behaviour is modelled by fixtures, not live-verified.
 All five design-r1b P2 findings are implemented. Status mapping includes rereading, skimmed,
 unknown values and every settable choice. Successful detail edits refresh the current server page
 with the query and clamped selection retained; if a refresh fails, known nonmatching rows are
-removed from the active status filter. Paging commits only successful results and shows failure
+removed from the active status filter. A transport failure may successfully load an older cached
+page, so the confirmed edit is reapplied before reconciling that page with the active filter.
+The simulator checks PUT success followed by an offline books GET, then opens the remaining row.
+Paging commits only successful results and shows failure
 inline over the loaded page. Facet counts have an explicit presence bit, so an omitted count is
 not rendered as zero. The proposed partial-page salvage was superseded by per-item streaming:
 all 60 long CJK facet entries survive even when the response exceeds 16 KB, with no skipped offsets.

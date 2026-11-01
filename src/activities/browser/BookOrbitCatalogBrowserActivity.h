@@ -128,6 +128,7 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   size_t displayCount() const;
   size_t toItemIndex(size_t displayIndex) const;
   int listPageItems() const;
+  int contextLineHeight() const;
   int listTop() const;
   int rowHeight() const;
   void moveSelection(int delta);

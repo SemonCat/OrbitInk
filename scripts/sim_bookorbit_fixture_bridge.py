@@ -133,6 +133,8 @@ def main() -> int:
         return finish(404, {"error": "fixture: outside /api/v1/koreader"})
     route = path[len(PREFIX):]
     books = {str(b["id"]): b for b in catalog.get("books", [])}
+    if method == "GET" and route == "/plugin/catalog/books" and faults.get("books_offline"):
+        return finish(0)
     if method == "GET" and route.startswith("/plugin/catalog/books/") and faults.get("fail_detail_once"):
         status = int(faults.pop("fail_detail_once"))
         return finish(status, {"error": "fixture detail fault"})
@@ -289,6 +291,8 @@ def main() -> int:
         if doc.get("status") not in ("unread", "want_to_read", "reading", "on_hold", "read", "abandoned"):
             return bad_request("status must be one of the following values")
         state.setdefault("statuses", {})[route.split("/")[-2]] = doc["status"]
+        if faults.get("books_offline_after_status"):
+            faults["books_offline"] = True
         return finish(200, {"readStatus": doc["status"]})
     if method == "PUT" and route.startswith("/plugin/catalog/books/") and route.endswith("/rating"):
         doc = json.loads(body or "{}")

@@ -244,9 +244,14 @@ size_t BookOrbitCatalogBrowserActivity::toItemIndex(const size_t displayIndex) c
   return listKind == ListKind::BOOKS ? displayIndex - 1 : displayIndex;
 }
 
+int BookOrbitCatalogBrowserActivity::contextLineHeight() const {
+  return std::max(renderer.getLineHeight(SMALL_FONT_ID, location.c_str()),
+                  renderer.getLineHeight(SMALL_FONT_ID, tr(STR_BO_OFFLINE)));
+}
+
 int BookOrbitCatalogBrowserActivity::listTop() const {
   const auto& m = UITheme::getInstance().getMetrics();
-  return m.topPadding + m.headerHeight + m.verticalSpacing + renderer.getLineHeight(SMALL_FONT_ID) * 2 + 12;
+  return m.topPadding + m.headerHeight + m.verticalSpacing + contextLineHeight() * 2 + 12;
 }
 
 int BookOrbitCatalogBrowserActivity::rowHeight() const {
@@ -447,7 +452,7 @@ void BookOrbitCatalogBrowserActivity::render(RenderLock&&) {
     path.erase(0, n);
   }
   renderer.drawText(SMALL_FONT_ID, x, contextY, path.c_str());
-  contextY += renderer.getLineHeight(SMALL_FONT_ID);
+  contextY += contextLineHeight();
   std::string position;
   if (offline) {
     position = tr(STR_BO_OFFLINE);
@@ -1311,13 +1316,19 @@ void BookOrbitCatalogBrowserActivity::returnFromDetail() {
     if (listNotice.empty() && books.empty() && page > 0) loadBooks(page - 1);
     paging = false;
     selectorIndex = std::max(0, std::min(savedIndex, static_cast<int>(displayCount()) - 1));
-    // If the refresh failed, never leave a known nonmatching row under the active filter.
-    if (!listNotice.empty() && !currentQuery.readStatus.empty()) {
-      books.erase(std::remove_if(books.begin(), books.end(), [this](const BOClient::BookSummary& book) {
-        return !BookOrbitCatalogBrowserPolicy::matchesReadFilter(book.readStatus, currentQuery.readStatus);
-      }), books.end());
+    // Cached rows predate the confirmed edit, just like rows retained after a failed refresh.
+    if (offline || !listNotice.empty()) {
+      for (auto& book : books) if (book.id == detail.id) {
+        book.readStatus = detail.readStatus;
+        book.progressPercent = detail.progressPercent;
+      }
+      if (!currentQuery.readStatus.empty()) {
+        books.erase(std::remove_if(books.begin(), books.end(), [this](const BOClient::BookSummary& book) {
+          return !BookOrbitCatalogBrowserPolicy::matchesReadFilter(book.readStatus, currentQuery.readStatus);
+        }), books.end());
+      }
       markDownloadedBooks();
-      selectorIndex = std::min(selectorIndex, static_cast<int>(displayCount()) - 1);
+      selectorIndex = std::max(0, std::min(selectorIndex, static_cast<int>(displayCount()) - 1));
     }
   }
   detailChanged = false;

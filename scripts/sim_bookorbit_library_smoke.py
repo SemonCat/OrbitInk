@@ -354,6 +354,29 @@ def after_suite(args, fx, state, flog, failures):
     need(failures, list((json.loads(state.read_text()) if state.exists() else {}).get("statuses", {}).values()) == ["read"],
               "choices: selected Finished status did not persist")
 
+    # The status PUT succeeds, but the refresh GET fails and reloads the pre-edit cached page.
+    # Reopen the selected row to prove that the edited book is no longer in the Reading filter.
+    f = all_books().press("ENTER")
+    down(f, 1).press("ENTER").press("ENTER")
+    down(f, 8).press("ENTER").press("DOWN").press("ENTER").wait(700)
+    f.press("DOWN").press("ENTER")
+    for _ in range(5): f.press("UP", 300)
+    down(f, 4).press("ENTER").wait(700).press("BACK").wait(700)
+    f.shot("after-31-edited-offline-filter.bmp", "confirmed Finished edit removed from cached Reading filter")
+    f.press("ENTER").wait(700).shot("after-32-offline-remaining-detail.bmp", "remaining Reading book is selectable after cache reconciliation")
+    _, routes = run("status-refresh-offline", f, {"books_offline_after_status": True})
+    gets = book_gets(routes)
+    need(failures, bool(gets) and gets[-1][0].get("sort") == "author" and
+         gets[-1][0].get("readStatus") == "reading" and gets[-1][1] == 0,
+         "status-refresh-offline: refresh must fail with the original sort and Reading filter")
+    writes = [r for r in routes if r[0] == "PUT" and r[1].endswith("/read-status")]
+    details = [r for r in routes if r[0] == "GET" and r[1].startswith("/plugin/catalog/books/")]
+    need(failures, len(writes) == 1 and writes[0][3] == 200 and
+         len(details) == 2 and all(r[3] == 200 for r in details) and details[0][1] != details[1][1],
+         "status-refresh-offline: cached list retained the edited book under Reading")
+    need(failures, list((json.loads(state.read_text()) if state.exists() else {}).get("statuses", {}).values()) == ["read"],
+         "status-refresh-offline: confirmed Finished status was lost")
+
     # A request failure at the page edge keeps page 1, its selection and Back stack intact.
     f = all_books()
     down(f, 21).wait(700).shot("after-12-page-error.bmp", "page request failed: loaded rows and selection remain")
