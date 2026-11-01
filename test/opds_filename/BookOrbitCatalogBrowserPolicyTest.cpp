@@ -151,3 +151,19 @@ TEST(BookOrbitCatalogBrowserPolicy, PagingMovesAtEdgesAndNeverWrapsTheLastPage) 
   EXPECT_TRUE(screen.fetch);
   EXPECT_EQ(screen.page, 1);
 }
+
+TEST(BookOrbitCatalogBrowserPolicy, WrapsUnspacedCjkAndMixedTitlesWithinMeasuredWidth) {
+  const auto measure = [](const std::string& text) {
+    int glyphs = 0;
+    for (const unsigned char c : text) if ((c & 0xc0) != 0x80) ++glyphs;
+    return glyphs;
+  };
+  EXPECT_EQ(BookOrbitCatalogBrowserPolicy::wrapTitle("星光圖書館長夜", 4, 3, measure),
+            (std::vector<std::string>{"星光圖書", "館長夜"}));
+  EXPECT_EQ(BookOrbitCatalogBrowserPolicy::wrapTitle("North 星光圖書", 6, 3, measure),
+            (std::vector<std::string>{"North", "星光圖書"}));
+  const auto clipped = BookOrbitCatalogBrowserPolicy::wrapTitle("星光圖書館長夜", 4, 1, measure);
+  ASSERT_EQ(clipped.size(), 1u);
+  EXPECT_EQ(clipped[0], "星...");
+  EXPECT_LE(measure(clipped[0]), 4);
+}

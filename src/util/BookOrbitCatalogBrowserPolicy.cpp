@@ -33,6 +33,37 @@ ListMove moveInList(int page, int index, int count, bool hasNext, int delta) {
   return {page, std::max(0, std::min(index + delta, count - 1)), false};
 }
 
+std::vector<std::string> wrapTitle(std::string text, int width, int maxLines,
+                                  const std::function<int(const std::string&)>& measure) {
+  std::vector<std::string> lines;
+  while (!text.empty() && static_cast<int>(lines.size()) < maxLines && width > 0) {
+    size_t fit = 0;
+    while (fit < text.size()) {
+      size_t next = fit + 1;
+      while (next < text.size() && (static_cast<unsigned char>(text[next]) & 0xc0) == 0x80) ++next;
+      if (measure(text.substr(0, next)) > width) break;
+      fit = next;
+    }
+    if (fit == text.size()) { lines.push_back(text); break; }
+    const bool last = static_cast<int>(lines.size()) + 1 == maxLines;
+    if (last) {
+      while (fit > 0 && measure(text.substr(0, fit) + "...") > width) {
+        --fit;
+        while (fit > 0 && (static_cast<unsigned char>(text[fit]) & 0xc0) == 0x80) --fit;
+      }
+      if (measure(text.substr(0, fit) + "...") <= width) lines.push_back(text.substr(0, fit) + "...");
+      break;
+    }
+    const size_t space = text.rfind(' ', fit);
+    if (space != std::string::npos && space > 0) fit = space;
+    if (fit == 0) break;  // No complete glyph fits the available width.
+    lines.push_back(text.substr(0, fit));
+    text.erase(0, fit);
+    while (!text.empty() && text.front() == ' ') text.erase(0, 1);
+  }
+  return lines;
+}
+
 namespace {
 
 constexpr size_t MAX_FILENAME_STEM_BYTES = 100;

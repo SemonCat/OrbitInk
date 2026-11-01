@@ -2,9 +2,11 @@
 
 #include <array>
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace BookOrbitCatalogBrowserPolicy {
 
@@ -20,6 +22,8 @@ struct ListMove {
   bool fetch;
 };
 ListMove moveInList(int page, int index, int count, bool hasNext, int delta);
+std::vector<std::string> wrapTitle(std::string text, int width, int maxLines,
+                                  const std::function<int(const std::string&)>& measure);
 
 std::string downloadPath(const std::string& authors, const std::string& title, const std::string& fileId,
                          size_t fileChoiceCount);

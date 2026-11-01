@@ -98,6 +98,9 @@ bool stage(const DeferredProgress& candidate) {
   }
 
   const DeferredProgress before = APP_STATE.deferredProgress;
+  // A retired provider's clock must not outrank the current BookOrbit account.
+  // This replacement is persisted and rolled back with the rest of the handoff below.
+  if (candidate.provider == 2 && APP_STATE.deferredProgress.provider == 1) APP_STATE.deferredProgress.clear();
   if (!APP_STATE.deferredProgress.consider(candidate)) {
     return APP_STATE.deferredProgress.covers(candidate);
   }

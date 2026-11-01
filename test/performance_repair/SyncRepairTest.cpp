@@ -358,6 +358,24 @@ TEST_F(SyncRepair, RetiredProviderHandoffIsIgnoredWithoutChangingSavedProgress) 
   EXPECT_TRUE(APP_STATE.deferredProgress.valid());
 }
 
+TEST_F(SyncRepair, BookOrbitReplacesNewerRetiredHandoffWithTransactionalRollback) {
+  auto legacy = remote();
+  legacy.provider = 1;
+  legacy.timestamp += 100;
+  ASSERT_TRUE(ProgressSyncDeferred::stage(legacy));
+  const auto candidate = remote();
+  APP_STATE.saveWorks = false;
+  EXPECT_FALSE(ProgressSyncDeferred::stage(candidate));
+  EXPECT_EQ(APP_STATE.deferredProgress.provider, 1);
+  EXPECT_EQ(APP_STATE.deferredProgress.timestamp, legacy.timestamp);
+  APP_STATE.saveWorks = true;
+  ASSERT_TRUE(ProgressSyncDeferred::stage(candidate));
+  DeferredProgress out;
+  ASSERT_TRUE(ProgressSyncDeferred::pendingForBook("/book.epub", out));
+  EXPECT_EQ(out.provider, 2);
+  EXPECT_EQ(out.timestamp, candidate.timestamp);
+}
+
 TEST_F(SyncRepair, BookOrbitChapterStartIgnoresIncompatibleCachedDenominator) {
   GfxRenderer renderer;
   auto candidate = remote(true);

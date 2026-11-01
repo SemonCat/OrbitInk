@@ -305,12 +305,12 @@ def after_suite(args, fx, state, flog, failures):
     def all_books():
         return down(Flow().press("ENTER").wait(1200), 3).press("ENTER").wait(800)
 
-    def run(name, flow, faults=None):
+    def run(name, flow, faults=None, fixture=None):
         nonlocal active
         active = not args.only or name in args.only.split(",")
         if not active:
             return "", []
-        log, reqs, images = run_flow(args, name, fx, state, flog, flow, failures, faults)
+        log, reqs, images = run_flow(args, name, fixture or fx, state, flog, flow, failures, faults)
         shots.extend(images)
         routes = catalog_requests(reqs)
         for method, route, query, status in routes:
@@ -380,6 +380,20 @@ def after_suite(args, fx, state, flog, failures):
     need(failures, len(details) == 2 and [r[3] for r in details] == [400, 200] and details[0][1] == details[1][1],
          "detail-failure: Retry must repeat the same detail request")
 
+    many = fx.parent / "many-authors"
+    many.mkdir(exist_ok=True)
+    shutil.copy2(fx / "book.epub", many / "book.epub")
+    catalog = json.loads((fx / "catalog.json").read_text())
+    catalog["books"] = [{"id": 701 + i, "title": f"Fixture book {i:03d}", "authors": [f"Author {i:03d}"],
+                         "files": [{"id": 9000 + i, "format": "epub", "file": "book.epub"}]} for i in range(61)]
+    (many / "catalog.json").write_text(json.dumps(catalog))
+    f = down(Flow().press("ENTER").wait(1200), 5).press("ENTER").wait(700)
+    down(f, 60).wait(700).press("ENTER").wait(700).shot("after-29-drill-error.bmp", "failed drill-in from facet page 2")
+    f.press("ENTER").wait(700).shot("after-30-drill-retry.bmp", "Retry loads the requested first book page")
+    _, routes = run("drill-failure", f, {"fail_once": "/plugin/catalog/books"}, many)
+    need(failures, [(q.get("page"), status) for q, status in book_gets(routes)] == [("1", 0), ("1", 200)],
+         "drill-failure: Retry inherited the parent facet page")
+
     # QWERTY, physical buttons only: type 1, then bottom-row OK. No Chinese input is implied.
     f = Flow().press("ENTER").wait(1200).press("ENTER").wait(700).shot("after-18-search-keyboard.bmp", "search via the visible root row")
     f.press("ENTER")
@@ -416,7 +430,8 @@ def after_suite(args, fx, state, flog, failures):
 
     run("offline", Flow().press("ENTER").wait(1400).shot("after-22-offline.bmp", "offline library retains local entry"), {"offline": True})
     run("error", Flow().press("ENTER").wait(1400).shot("after-23-error.bmp", "localized server rejection with Retry"), {"catalog_status": 400})
-    run("loading", Flow().press("ENTER", 350).shot("after-24-loading.bmp", "loading retains library context").wait(2200), {"delay_ms": 1500})
+    f = down(Flow().press("ENTER").wait(4000), 3).press("ENTER", 350).shot("after-24-loading.bmp", "catalog loading retains library context").wait(2200)
+    run("loading", f, {"delay_ms": 1500})
     return shots
 
 

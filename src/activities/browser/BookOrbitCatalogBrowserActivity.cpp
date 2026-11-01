@@ -158,7 +158,8 @@ void BookOrbitCatalogBrowserActivity::onEnter() {
   catalogSessionCache.clear();
   navigationHistory.clear();
   currentQuery = BOClient::BookQuery{};
-  currentPage = 0;
+  currentPage = requestedPage = 0;
+  resumeRequestAfterWifi = retryDetail = false;
   currentPageHasNext = false;
   selectorIndex = 0;
   totalBooks = 0;
@@ -317,11 +318,6 @@ void BookOrbitCatalogBrowserActivity::loop() {
 
   if (state == BrowserState::ERROR) {
     if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-      if (retryDetail && wifiConnected()) {
-        const auto book = retryBook;
-        openBookDetail(book);
-        return;
-      }
       if (wifiConnected()) {
         // An explicit Retry with the link up always tries the server again: a transport failure
         // earlier in the session must not pin the library offline (final review r1, finding 1).
@@ -329,21 +325,9 @@ void BookOrbitCatalogBrowserActivity::loop() {
         state = BrowserState::LOADING;
         statusMessage = tr(STR_LOADING);
         requestUpdate();
-        switch (listKind) {
-          case ListKind::ROOT:
-            loadRoot();
-            break;
-          case ListKind::BOOKS:
-            loadBooks(currentPage);
-            break;
-          case ListKind::FACETS:
-            loadFacets(currentPage);
-            break;
-          case ListKind::DOWNLOADED:
-            loadDownloaded(currentPage);
-            break;
-        }
+        retryRequest();
       } else {
+        resumeRequestAfterWifi = true;
         launchWifiSelection();
       }
     } else if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
@@ -610,8 +594,10 @@ void BookOrbitCatalogBrowserActivity::renderDetail(const int pageWidth, const in
   const int width = pageWidth - 2 * metrics.contentSidePadding;
   int y = listTop();
 
-  const int titleLine = renderer.getLineHeight(UI_12_FONT_ID);
-  const auto titleLines = renderer.wrappedText(UI_12_FONT_ID, detail.title.c_str(), width, 3, EpdFontFamily::BOLD);
+  const int titleLine = renderer.getLineHeight(UI_12_FONT_ID, detail.title.c_str(), EpdFontFamily::BOLD);
+  const auto titleLines = BookOrbitCatalogBrowserPolicy::wrapTitle(detail.title, width, 3, [this](const std::string& text) {
+    return renderer.getTextWidth(UI_12_FONT_ID, text.c_str(), EpdFontFamily::BOLD);
+  });
   for (const auto& line : titleLines) {
     renderer.drawText(UI_12_FONT_ID, x, y, line.c_str(), true, EpdFontFamily::BOLD);
     y += titleLine;
@@ -750,6 +736,9 @@ void BookOrbitCatalogBrowserActivity::enterOffline() {
 }
 
 void BookOrbitCatalogBrowserActivity::loadRoot() {
+  listKind = ListKind::ROOT;
+  requestedPage = 0;
+  retryDetail = false;
   std::vector<BOClient::Section> result;
   offlineSavedDate.clear();
   retryNetworkIfLinkUp();
@@ -813,9 +802,9 @@ void BookOrbitCatalogBrowserActivity::markDownloadedBooks() {
 }
 
 void BookOrbitCatalogBrowserActivity::loadBooks(const int page) {
+  requestedPage = page;
   retryNetworkIfLinkUp();
-  // The ERROR screen's Retry reloads `listKind` at `currentPage`, so both name THIS request from
-  // the start -- otherwise a failed list load would retry the previous screen (the root) instead.
+  // Retry uses the requested page; the visible page commits only after a successful load.
   listKind = ListKind::BOOKS;
   BOClient::BookQuery request = currentQuery;
   request.page = page;
@@ -861,6 +850,7 @@ void BookOrbitCatalogBrowserActivity::loadBooks(const int page) {
 }
 
 void BookOrbitCatalogBrowserActivity::loadFacets(const int page) {
+  requestedPage = page;
   retryNetworkIfLinkUp();
   listKind = ListKind::FACETS;  // see loadBooks(): Retry must reload this request
   if (offline) {
@@ -914,6 +904,7 @@ void BookOrbitCatalogBrowserActivity::loadFacets(const int page) {
 }
 
 void BookOrbitCatalogBrowserActivity::loadDownloaded(const int page) {
+  requestedPage = page;
   listKind = ListKind::DOWNLOADED;
   const int pageSize = listPageItems();
   std::vector<BookOrbitLibrary::Entry> rows(static_cast<size_t>(pageSize) + 1);
@@ -1410,9 +1401,29 @@ void BookOrbitCatalogBrowserActivity::onWifiSelectionComplete(const bool connect
   requestUpdate(true);
   if (connected) {
     offline = false;
-    loadRoot();
+    if (resumeRequestAfterWifi) {
+      resumeRequestAfterWifi = false;
+      retryRequest();
+    } else {
+      loadRoot();
+    }
   } else {
+    resumeRequestAfterWifi = false;
     // No network: the library still opens, with 已下載 and the last cached root (never a dead end).
     enterOffline();
+  }
+}
+
+void BookOrbitCatalogBrowserActivity::retryRequest() {
+  if (retryDetail) {
+    const auto book = retryBook;
+    openBookDetail(book);
+    return;
+  }
+  switch (listKind) {
+    case ListKind::ROOT: loadRoot(); break;
+    case ListKind::BOOKS: loadBooks(requestedPage); break;
+    case ListKind::FACETS: loadFacets(requestedPage); break;
+    case ListKind::DOWNLOADED: loadDownloaded(requestedPage); break;
   }
 }

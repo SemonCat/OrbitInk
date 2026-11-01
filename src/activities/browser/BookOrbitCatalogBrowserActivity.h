@@ -82,6 +82,8 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   BookOrbitCatalogBrowserPolicy::NavigationHistory<NavFrame> navigationHistory;
   BookOrbitCatalogClient::BookQuery currentQuery;
   int currentPage = 0;
+  int requestedPage = 0;
+  bool resumeRequestAfterWifi = false;
   bool currentPageHasNext = false;
   int selectorIndex = 0;
   uint32_t totalBooks = 0;
@@ -137,6 +139,7 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   void onWifiSelectionComplete(bool connected);
   void enterOffline();
   void retryNetworkIfLinkUp();
+  void retryRequest();
   BookOrbitCatalogClient::Session& catalogSession();
   // Session::PrepareHeapFn for every catalog request: drops the rebuildable SD-font page arenas
   // the status screen rendered with, under the RenderLock, right before the TLS heap gate.

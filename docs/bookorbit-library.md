@@ -177,3 +177,8 @@ no requests or timer, and S10 proves a corrupt retired store cannot stop BookOrb
 The implementation remains text-only and button-driven. Search uses the existing QWERTY input;
 the scoped search action preserves current server filters and sort. Publication and final visual
 acceptance belong to the parent; this branch is a reviewable candidate, never a pushed release.
+
+The final independent-review remediation also records requested pages separately from committed
+visible pages (including Retry after a facet drill-in and Wi-Fi reconnection), and transactionally
+replaces ignored legacy provider handoffs before comparing BookOrbit timestamps. Detail titles
+use bounded UTF-8 wrapping for unspaced CJK text; the shared Latin word wrapper remains unchanged.
