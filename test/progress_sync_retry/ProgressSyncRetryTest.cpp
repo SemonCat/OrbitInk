@@ -9,7 +9,9 @@
 #include "DeferredProgress.h"
 #include "KOReaderSyncClient.h"
 #include "ProgressPullPolicy.h"
+#include "ProgressSyncReceipt.h"
 #include "ProgressSyncRetry.h"
+#include "ProgressSyncNetwork.h"
 #include "ProgressSyncSchedule.h"
 
 using namespace ProgressSyncRetry;
@@ -405,7 +407,8 @@ TEST(ProgressSyncRetry, ProviderHardwarePathsValidateBeforeWifiAndSuppressSideWo
     EXPECT_NE(text.find("ProgressSyncNetwork::connect()"), std::string::npos);
   }
   const auto network = source("/src/util/ProgressSyncNetwork.cpp");
-  EXPECT_NE(network.find("millis() - start >= 3500"), std::string::npos);
+  EXPECT_NE(network.find("millis() - start >= budgetMs"), std::string::npos);
+  EXPECT_NE(source("/src/util/ProgressSyncNetwork.h").find("CONNECT_BUDGET_MS = 3500;"), std::string::npos);
   EXPECT_EQ(network.find("scanNetworks("), std::string::npos);
 }
 
@@ -423,4 +426,83 @@ TEST(ProgressSyncRetry, DeferredApplyOccursAfterProviderTransactionReturnsAndInv
   const auto body = deferred.substr(stage, deferred.find("\n}", stage) - stage);
   EXPECT_NE(body.find("quickResumeSkipRenderEligible = false"), std::string::npos);
   EXPECT_NE(body.find("Storage.remove(SLEEP_FRAME_FILE)"), std::string::npos);
+}
+
+TEST(ProgressSyncReceipt, LineHasFixedFieldsSecondsAndUnknownMarkers) {
+  ProgressSyncReceipt::Record r;
+  r.trigger = ProgressSyncReceipt::Trigger::Timer;
+  r.kosync = -1;
+  r.bookOrbit = static_cast<int8_t>(Outcome::Retry);
+  r.wifi = ProgressSyncReceipt::Wifi::Connected;
+  r.wifiMs = 4210;
+  r.gateChecks = 1;
+  r.gateRejections = 1;
+  r.gateMinFree = 30000;
+  r.gateMinLargest = 19000;
+  r.freeHeap = 31000;
+  r.largestBlock = 19500;
+  r.minFreeHeap = 29000;
+  r.nextDelayMicros = ProgressSyncSchedule::intervalMicros(ProgressSyncSchedule::Hours24);
+  r.usb = 0;
+  r.cycle = 7;
+  r.prevArmedMicros = ProgressSyncSchedule::intervalMicros(ProgressSyncSchedule::Hours24);
+  char line[256];
+  ASSERT_GT(ProgressSyncReceipt::format(r, line, sizeof(line)), 0u);
+  EXPECT_STREQ(line,
+               "at=- t=timer store=ok ko=- bo=retry wifi=ok/4210ms gate=1/1 gmin=30000/19000 "
+               "heap=31000/19500/29000 next=86400s usb=0 cycle=7 prev=86400s\n");
+
+  r.trigger = ProgressSyncReceipt::Trigger::Boot;
+  r.storeFailed = true;
+  r.hasTime = true;
+  r.epochMinutes = 29891737;
+  r.kosync = static_cast<int8_t>(Outcome::NoRetry);
+  r.bookOrbit = static_cast<int8_t>(Outcome::Confirmed);
+  r.wifi = ProgressSyncReceipt::Wifi::Failed;
+  r.usb = -1;
+  ASSERT_GT(ProgressSyncReceipt::format(r, line, sizeof(line)), 0u);
+  EXPECT_EQ(std::string(line).rfind("at=29891737m t=boot store=fail ko=stop bo=ok wifi=fail/4210ms ", 0), 0u);
+  EXPECT_NE(std::string(line).find(" usb=- "), std::string::npos);
+  // Too small a buffer writes no partial line.
+  EXPECT_EQ(ProgressSyncReceipt::format(r, line, 40), 0u);
+}
+
+// A timer wake must keep its cadence when a store exists but cannot be read, and must not mistake
+// that for configuration. Behaviour is exercised end to end by scripts/sim_periodic_sync_smoke.py
+// (S5/S7/S8); this pins the device-only parts the simulator cannot reach.
+TEST(ProgressSyncRetry, HeadlessWakeReArmsRetainedDelayOnlyForUnreadableStores) {
+  const auto main = source("/src/main.cpp");
+  const auto start = main.find("static void synchronizeProgressHeadlessly()");
+  ASSERT_NE(start, std::string::npos);
+  const auto body = main.substr(start, main.find("\n}\n", start) - start);
+  for (const char* store : {"APP_STATE.loadFromFile()", "loadedOrAbsent(SETTINGS)", "loadedOrAbsent(WIFI_STORE)",
+                            "loadedOrAbsent(KOREADER_STORE)", "loadedOrAbsent(BOOKORBIT_STORE)"}) {
+    EXPECT_LT(body.find(store), body.find("ProgressSyncRetry::sleepDelayMicros()")) << store;
+  }
+  EXPECT_NE(main.find("Storage.probePath(Store::getFilePath()) == HalStorage::PathStatus::Absent"), std::string::npos);
+  EXPECT_NE(body.find("nextSyncDelayMicros = HalPowerManager::retainedTimerDelayMicros();"), std::string::npos);
+  EXPECT_NE(body.find("ProgressSyncNetwork::UNATTENDED_CONNECT_BUDGET_MS"), std::string::npos);
+  EXPECT_LT(body.find("ProgressSyncReceipt::commit(nextSyncDelayMicros)"), body.find("powerManager.startDeepSleep("));
+
+  // RTC copy: cleared before arming, kept only for a timer the hardware accepted, on the X3 only.
+  const auto hal = source("/lib/hal/HalPowerManager.cpp");
+  EXPECT_NE(hal.find("RTC_DATA_ATTR uint64_t rtcArmedTimerDelayMicros"), std::string::npos);
+  EXPECT_LT(hal.find("  rtcArmedTimerDelayMicros = 0;\n"), hal.find("rtcArmedTimerDelayMicros = retryDelayMicros;"));
+  EXPECT_NE(hal.find("gpio.deviceIsX3() && retryDelayMicros != 0 && esp_sleep_enable_timer_wakeup(retryDelayMicros) "
+                     "== ESP_OK"),
+            std::string::npos);
+}
+
+TEST(ProgressSyncRetry, OnlyTheTimerRouteGetsTheLongConnectBudget) {
+  static_assert(ProgressSyncNetwork::CONNECT_BUDGET_MS == 3500, "open/close/sleep latency budget is unchanged");
+  static_assert(ProgressSyncNetwork::UNATTENDED_CONNECT_BUDGET_MS > ProgressSyncNetwork::CONNECT_BUDGET_MS);
+  const auto main = source("/src/main.cpp");
+  size_t uses = 0;
+  for (size_t at = main.find("UNATTENDED_CONNECT_BUDGET_MS"); at != std::string::npos;
+       at = main.find("UNATTENDED_CONNECT_BUDGET_MS", at + 1)) {
+    uses++;
+  }
+  EXPECT_EQ(uses, 1u);
+  const auto sleep = main.substr(main.find("void enterDeepSleep("));
+  EXPECT_NE(sleep.find("ProgressSyncNetwork::Batch syncBatch(APP_STATE.openEpubPath, &renderer);"), std::string::npos);
 }

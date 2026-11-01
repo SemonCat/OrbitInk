@@ -10,12 +10,14 @@
 #include <utility>
 
 #include "ProgressSyncDeferred.h"
+#include "ProgressSyncReceipt.h"
 #include "WifiCredentialStore.h"
 
 namespace ProgressSyncNetwork {
 namespace {
 unsigned depth = 0;
 bool attempted = false;
+unsigned long budgetMs = CONNECT_BUDGET_MS;
 std::string identityPath;
 std::string identity;
 
@@ -25,9 +27,11 @@ void stop() {
 }
 }  // namespace
 
-Batch::Batch(std::string bookPath, GfxRenderer* gfx) : path(std::move(bookPath)), renderer(gfx) {
+Batch::Batch(std::string bookPath, GfxRenderer* gfx, unsigned long connectBudgetMs)
+    : path(std::move(bookPath)), renderer(gfx) {
   if (depth++ == 0) {
     attempted = false;
+    budgetMs = connectBudgetMs;
     identityPath = path;
     identity.clear();
   }
@@ -43,6 +47,7 @@ Batch::~Batch() {
   // No provider transport survives its call, and the radio is off before mapping.
   if (renderer) ProgressSyncDeferred::applyForBook(path, *renderer);
   depth = 0;
+  budgetMs = CONNECT_BUDGET_MS;
   identityPath.clear();
   identity.clear();
 }
@@ -80,9 +85,13 @@ bool connect() {
   const unsigned long start = millis();
   while (WiFi.status() != WL_CONNECTED) {
     gpio.update();
-    if (millis() - start >= 3500 || gpio.wasAnyPressed()) return false;
+    if (millis() - start >= budgetMs || gpio.wasAnyPressed()) {
+      ProgressSyncReceipt::noteWifi(false, millis() - start);
+      return false;
+    }
     delay(50);
   }
+  ProgressSyncReceipt::noteWifi(true, millis() - start);
   return true;
 }
 

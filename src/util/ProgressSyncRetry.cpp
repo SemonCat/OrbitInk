@@ -8,6 +8,7 @@
 
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
+#include "ProgressSyncReceipt.h"
 #include "ProgressSyncSchedule.h"
 
 namespace ProgressSyncRetry {
@@ -20,6 +21,7 @@ void persistIfChanged(const State& before) {
 }  // namespace
 
 void record(Provider provider, const std::string& path, Outcome outcome) {
+  ProgressSyncReceipt::noteOutcome(provider, outcome);
   const auto before = APP_STATE.progressSyncRetry;
   APP_STATE.progressSyncRetry.observe(provider, path, outcome);
   persistIfChanged(before);

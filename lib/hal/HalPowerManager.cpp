@@ -13,6 +13,15 @@
 
 HalPowerManager powerManager;  // Singleton instance
 
+namespace {
+// RTC_DATA_ATTR is reinitialized (to 0) by every boot except a deep-sleep wake.
+RTC_DATA_ATTR uint64_t rtcArmedTimerDelayMicros = 0;
+RTC_DATA_ATTR uint32_t rtcSleepCycles = 0;
+}  // namespace
+
+uint64_t HalPowerManager::retainedTimerDelayMicros() { return rtcArmedTimerDelayMicros; }
+uint32_t HalPowerManager::retainedSleepCycles() { return rtcSleepCycles; }
+
 void HalPowerManager::begin() {
   if (BoardConfig::ACTIVE.batteryAdc >= 0) {
     pinMode(BoardConfig::ACTIVE.batteryAdc, INPUT);
@@ -106,9 +115,11 @@ void HalPowerManager::startDeepSleep(HalGPIO& gpio, uint64_t retryDelayMicros) c
   // remove any old timer when all progress has been confirmed. X4 cuts MCU power
   // on battery, so this retry mechanism is enabled only on the X3.
   esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
-  if (gpio.deviceIsX3() && retryDelayMicros != 0) {
-    esp_sleep_enable_timer_wakeup(retryDelayMicros);
+  rtcArmedTimerDelayMicros = 0;
+  if (gpio.deviceIsX3() && retryDelayMicros != 0 && esp_sleep_enable_timer_wakeup(retryDelayMicros) == ESP_OK) {
+    rtcArmedTimerDelayMicros = retryDelayMicros;
   }
+  rtcSleepCycles++;
 
   // Waits for the power button to be physically released (so holding it doesn't
   // immediately wake the device again), then arms the wake source and sleeps.

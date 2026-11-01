@@ -44,6 +44,7 @@
 #include "util/KOReaderAutoSync.h"
 #include "util/ProgressSyncNetwork.h"
 #include "util/ProgressSyncDeferred.h"
+#include "util/ProgressSyncReceipt.h"
 #include "util/ProgressSyncRetry.h"
 #include "util/ScreenshotUtil.h"
 
@@ -268,6 +269,7 @@ void enterDeepSleep(bool fromTimeout = false) {
   if (needsOverlayBase && !isQuickResumeSleep) Storage.remove(SLEEP_FRAME_FILE);
 
   // Each provider keeps its own outcome and TLS session within one radio interval.
+  ProgressSyncReceipt::begin(ProgressSyncReceipt::Trigger::Sleep);
   {
     ProgressSyncNetwork::Batch syncBatch(APP_STATE.openEpubPath, &renderer);
     KOReaderAutoSync::syncOnSleep(renderer);
@@ -287,7 +289,17 @@ void enterDeepSleep(bool fromTimeout = false) {
   display.deepSleep();
   LOG_DBG("MAIN", "Entering deep sleep");
 
-  powerManager.startDeepSleep(gpio, ProgressSyncRetry::sleepDelayMicros());
+  const uint64_t nextSyncDelayMicros = ProgressSyncRetry::sleepDelayMicros();
+  ProgressSyncReceipt::commit(nextSyncDelayMicros);
+  powerManager.startDeepSleep(gpio, nextSyncDelayMicros);
+}
+
+// Boot paths that go straight back to sleep keep the periodic cadence and leave a receipt.
+static void returnToSleep(const ProgressSyncReceipt::Trigger trigger) {
+  ProgressSyncReceipt::begin(trigger);
+  const uint64_t nextSyncDelayMicros = ProgressSyncRetry::sleepDelayMicros();
+  ProgressSyncReceipt::commit(nextSyncDelayMicros);
+  powerManager.startDeepSleep(gpio, nextSyncDelayMicros);
 }
 
 void setupDisplayAndFonts(bool seamless = false) {
@@ -326,31 +338,48 @@ void setupDisplayAndFonts(bool seamless = false) {
   LOG_DBG("MAIN", "Fonts setup");
 }
 
+// A missing file is configuration (nothing saved yet, or deliberately removed); a file that exists
+// but cannot be read on this wake is a card failure that must not be mistaken for configuration.
+template <typename Store>
+static bool loadedOrAbsent(Store& store) {
+  return store.loadFromFile() || Storage.probePath(Store::getFilePath()) == HalStorage::PathStatus::Absent;
+}
+
 // Timer wake never enters the display/UI boot path, including SD failure. The
 // uninitialized renderer only supplies a null font-cache pointer to push code.
 static void synchronizeProgressHeadlessly() {
   gpio.begin();
   powerManager.begin();
+  ProgressSyncReceipt::begin(ProgressSyncReceipt::Trigger::Timer);
   uint64_t nextSyncDelayMicros = 0;
-  if (Storage.begin() && APP_STATE.loadFromFile()) {
-    SETTINGS.loadFromFile();
-    WIFI_STORE.loadFromFile();
-    KOREADER_STORE.loadFromFile();
-    BOOKORBIT_STORE.loadFromFile();
+  const bool storageReady = Storage.begin();
+  // Evaluated in order and all-or-nothing: a partial load would read as "no WiFi" or "no
+  // credentials" and silently stop the schedule.
+  const bool storesReady = storageReady && APP_STATE.loadFromFile() && loadedOrAbsent(SETTINGS) &&
+                           loadedOrAbsent(WIFI_STORE) && loadedOrAbsent(KOREADER_STORE) &&
+                           loadedOrAbsent(BOOKORBIT_STORE);
+  if (storesReady) {
     if (ProgressSyncRetry::sleepDelayMicros() != 0) {
       // Optional RTC access preserves the shared success timestamp; it does not
       // gate scheduling or require a valid wall clock.
       halClock.begin();
       const std::string path = APP_STATE.openEpubPath;
-      ProgressSyncNetwork::Batch syncBatch(path);
+      ProgressSyncNetwork::Batch syncBatch(path, nullptr, ProgressSyncNetwork::UNATTENDED_CONNECT_BUDGET_MS);
       KOReaderAutoSync::syncHeadlessly(path);
       BookOrbitAutoSync::syncHeadlessly(path);
       nextSyncDelayMicros = ProgressSyncRetry::sleepDelayMicros();
     }
+  } else {
+    // A card or store that cannot be read on this one wake must not end the overnight cadence:
+    // keep the interval the previous sleep armed. Settings, and therefore Off, are only reachable
+    // through the stores, which is why there is nothing else to consult here.
+    ProgressSyncReceipt::noteStoreFailure();
+    nextSyncDelayMicros = HalPowerManager::retainedTimerDelayMicros();
   }
-  // Also covers failed store loads and a wake with no eligible providers.
+  // Also covers a wake with no eligible providers.
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
+  if (storageReady) ProgressSyncReceipt::commit(nextSyncDelayMicros);
   powerManager.startDeepSleep(gpio, nextSyncDelayMicros);
 }
 
@@ -433,13 +462,13 @@ void setup() {
       LOG_DBG("MAIN", "Verifying power button press duration");
       if (!gpio.verifyPowerButtonWakeup(SETTINGS.getPowerButtonDuration(),
                                         SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP)) {
-        powerManager.startDeepSleep(gpio, ProgressSyncRetry::sleepDelayMicros());
+        returnToSleep(ProgressSyncReceipt::Trigger::RejectedWake);
       }
       break;
     case HalGPIO::WakeupReason::AfterUSBPower:
       // If USB power caused a cold boot, go back to sleep
       LOG_DBG("MAIN", "Wakeup reason: After USB Power");
-      powerManager.startDeepSleep(gpio, ProgressSyncRetry::sleepDelayMicros());
+      returnToSleep(ProgressSyncReceipt::Trigger::UsbBoot);
       break;
     case HalGPIO::WakeupReason::AfterFlash:
       // After flashing, just proceed to boot
@@ -447,6 +476,10 @@ void setup() {
     default:
       break;
   }
+  // One line per interactive boot: with the line written by the sleep before it, this shows
+  // whether the device actually came back from that deep sleep (see ProgressSyncReceipt.h).
+  ProgressSyncReceipt::begin(ProgressSyncReceipt::Trigger::Boot);
+  ProgressSyncReceipt::commit(0);
 
   // Recovery firmware mode: hold left side button (BTN_UP) together with the power button at
   // boot to skip directly to the SD-card firmware update screen. Useful on devices where USB

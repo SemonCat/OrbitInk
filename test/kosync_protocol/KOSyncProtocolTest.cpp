@@ -24,6 +24,7 @@
 
 #include "KOReaderCredentialStore.h"
 #include "KOReaderSyncClient.h"
+#include "KOSyncRequestHelpers.h"
 #include "KOSyncTransport.h"
 #include "Logging.h"
 
@@ -521,4 +522,30 @@ TEST_F(KOSyncProtocolTest, MalformedUrlIsPermanentWithoutSendingARequest) {
   EXPECT_EQ(session.getProgress(progress.document, progress), KOReaderSyncClient::BAD_REQUEST);
   EXPECT_EQ(session.updateProgress(progress), KOReaderSyncClient::BAD_REQUEST);
   EXPECT_TRUE(fake->requests.empty());
+}
+
+// The receipt reports what the TLS gate saw; counting must never change the gate's decision.
+TEST(KOSyncHeapGate, StatisticsTrackChecksRejectionsAndLowestValuesWithoutChangingTheDecision) {
+  const HostEspStub saved = ESP;
+  KOSyncRequest::heapGateStats = {};
+  ESP.freeHeap = 60000;
+  ESP.maxAllocHeap = 40000;
+  EXPECT_FALSE(KOSyncRequest::insufficientHeap());
+  ESP.freeHeap = 30000;  // below 35,000 free
+  ESP.maxAllocHeap = 45000;
+  EXPECT_TRUE(KOSyncRequest::insufficientHeap());
+  ESP.freeHeap = 50000;
+  ESP.maxAllocHeap = 19999;  // below the 20,000 block
+  EXPECT_TRUE(KOSyncRequest::insufficientHeap());
+  ESP.freeHeap = KOSyncRequest::MIN_FREE_FOR_TLS;  // exactly at both thresholds passes
+  ESP.maxAllocHeap = KOSyncRequest::MIN_BLOCK_FOR_TLS;
+  EXPECT_FALSE(KOSyncRequest::insufficientHeap());
+
+  const auto& stats = KOSyncRequest::heapGateStats;
+  EXPECT_EQ(stats.checks, 4);
+  EXPECT_EQ(stats.rejections, 2);
+  EXPECT_EQ(stats.minFree, 30000u);  // independent minima, not one sample's pair
+  EXPECT_EQ(stats.minLargest, 19999u);
+  ESP = saved;
+  KOSyncRequest::heapGateStats = {};
 }

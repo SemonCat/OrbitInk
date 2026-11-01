@@ -73,7 +73,7 @@ target_compile_definitions(PowerLifecycleTest PRIVATE CROSSPOINT_EMULATED=1 BOAR
 target_link_libraries(PowerLifecycleTest PRIVATE crosspoint_test_common GTest::gtest_main)
 gtest_discover_tests(PowerLifecycleTest)
 
-add_executable(SyncRepairTest SyncRepairTest.cpp
+add_executable(SyncRepairTest SyncRepairTest.cpp sync_stubs/ProgressSyncReceiptStub.cpp
   ${REPO_ROOT}/src/util/ProgressSyncPosition.cpp
   ${REPO_ROOT}/src/util/ProgressSyncNetwork.cpp
   ${REPO_ROOT}/src/util/ProgressSyncDeferred.cpp

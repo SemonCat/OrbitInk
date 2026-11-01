@@ -50,11 +50,26 @@ inline void applyAuthHeaders(KOSyncTransport& http, const std::string& username,
   http.addHeader("Authorization", std::string("Basic ") + encoded.c_str());
 }
 
+// What the gate below saw since the last reset, for ProgressSyncReceipt. Counting only; the gate's
+// decision never depends on it.
+struct HeapGateStats {
+  uint16_t checks = 0;
+  uint16_t rejections = 0;
+  uint32_t minFree = UINT32_MAX;
+  uint32_t minLargest = UINT32_MAX;
+};
+inline HeapGateStats heapGateStats;
+
 // True when free heap is too low to risk a TLS handshake.
 inline bool insufficientHeap() {
   const uint32_t freeHeap = ESP.getFreeHeap();
   const uint32_t maxAllocHeap = ESP.getMaxAllocHeap();
+  auto& stats = heapGateStats;
+  if (stats.checks < UINT16_MAX) stats.checks++;
+  if (freeHeap < stats.minFree) stats.minFree = freeHeap;
+  if (maxAllocHeap < stats.minLargest) stats.minLargest = maxAllocHeap;
   if (freeHeap < MIN_FREE_FOR_TLS || maxAllocHeap < MIN_BLOCK_FOR_TLS) {
+    if (stats.rejections < UINT16_MAX) stats.rejections++;
     LOG_ERR("KOSync", "Insufficient heap for TLS handshake: %u bytes free (need %u), %u max alloc (need %u)", freeHeap,
             MIN_FREE_FOR_TLS, maxAllocHeap, MIN_BLOCK_FOR_TLS);
     return true;

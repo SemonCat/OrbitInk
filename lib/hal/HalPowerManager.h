@@ -55,6 +55,14 @@ class HalPowerManager {
   // Should be called inside main loop() to handle the currentLockMode
   void startDeepSleep(HalGPIO& gpio, uint64_t retryDelayMicros = 0) const;
 
+  // The timer delay the previous startDeepSleep() actually armed, kept in RTC slow memory: it
+  // survives deep sleep and reads 0 after any other reset (power-on, flash, restart, panic). A
+  // timer wake that cannot read its SD stores re-arms this instead of ending the cadence.
+  static uint64_t retainedTimerDelayMicros();
+  // Deep sleeps entered since the last reset that was not a deep-sleep wake, in the same RTC
+  // memory. Back at 0 means RTC power or state was lost (power cut, brownout, panic, restart).
+  static uint32_t retainedSleepCycles();
+
   // Get battery percentage (range 0-100)
   uint16_t getBatteryPercentage() const;
 

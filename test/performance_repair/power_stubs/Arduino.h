@@ -1,6 +1,7 @@
 #pragma once
 #include <cmath>
 #include <cstdint>
+#define RTC_DATA_ATTR
 inline unsigned long testMillis = 1000;
 inline int testCpuMHz = 160;
 inline unsigned long millis() { return testMillis; }
