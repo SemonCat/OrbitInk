@@ -3,6 +3,12 @@ name: OrbitInk channels
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - docs/release-notes.md
+      - docs/contributing/release-notes.md
+      - scripts/orbitink_ci.py
+      - scripts/test_orbitink_ci.py
+      - .github/workflows/orbitink.yml
   workflow_dispatch:
     inputs:
       channel:
@@ -71,7 +77,7 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    # Build every main push. Serialize publication; superseded builds cannot regress pointers.
+    # Build qualifying main pushes. Serialize publication; superseded builds cannot regress pointers.
     concurrency:
       group: orbitink-channels
       cancel-in-progress: false

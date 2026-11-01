@@ -22,6 +22,42 @@ CHANNELS = {"stable": "bookorbit-x3", "nightly": "orbitink-x3-nightly"}
 REPOSITORY = "SemonCat/OrbitInk"
 LEGACY_REPOSITORY = "SemonCat/BookOrbit-X3"
 ROOT = Path(__file__).resolve().parent.parent
+NOTES_SOURCE = "docs/release-notes.md"
+# Keep in sync with orbitink.yml paths-ignore. None of these files enters the firmware.
+EDITORIAL_PATHS = {
+    NOTES_SOURCE, "docs/contributing/release-notes.md", "scripts/orbitink_ci.py",
+    "scripts/test_orbitink_ci.py", ".github/workflows/orbitink.yml",
+}
+
+
+def notes_hash(head="HEAD"):
+    """Bind notes to tracked source content/modes/gitlinks, independent of commit metadata."""
+    entries = subprocess.check_output(["git", "ls-tree", "-rz", "--full-tree", head], cwd=ROOT)
+    return hashlib.sha256(b"".join(
+        entry + b"\0" for entry in entries.split(b"\0") if entry
+        and entry.split(b"\t", 1)[1].decode() not in EDITORIAL_PATHS)).hexdigest()
+
+
+def release_notes(head):
+    try:
+        text = subprocess.check_output(
+            ["git", "show", f"{head}:{NOTES_SOURCE}"], cwd=ROOT, stderr=subprocess.PIPE).decode("utf-8")
+    except (subprocess.CalledProcessError, UnicodeDecodeError) as error:
+        raise ValueError(f"missing or invalid tracked {NOTES_SOURCE}") from error
+    lines = text.splitlines()
+    if not lines or lines[0] != f"<!-- source-sha256: {notes_hash(head)} -->":
+        raise ValueError("missing/stale release notes source hash; run orbitink_ci.py notes-hash after committing source")
+    bullets = [line for line in lines[1:] if line.strip()]
+    if (not 1 <= len(bullets) <= 4 or any(
+            not re.fullmatch(r"- \S(?:.{0,96}\S)?", line)
+            or re.search(r"TODO|TBD|https?://|@[A-Z_]+@", line) for line in bullets)):
+        raise ValueError("release notes must contain 1-4 short purpose-only bullets (at most 100 characters each)")
+    return "\n".join(bullets) + "\n"
+
+
+def check_staged_notes(directory, head):
+    if (directory / "RELEASE-NOTES.md").read_text() != release_notes(head):
+        raise ValueError("staged release notes differ from current tracked notes")
 
 
 def build_number(run_number, attempt):
@@ -45,6 +81,7 @@ def configure(args):
         if (os.environ.get("GITHUB_ACTOR") != "SemonCat" or args.confirm != "RELEASE"
                 or args.version != version):
             raise ValueError("stable requires owner dispatch, RELEASE, and the committed runtime version")
+    release_notes(os.environ["GITHUB_SHA"])
     number = build_number(int(os.environ["GITHUB_RUN_NUMBER"]), int(os.environ["GITHUB_RUN_ATTEMPT"]))
     local = ROOT / "platformio.local.ini"
     # CI has no personal overrides. Refuse to replace an operator's local configuration.
@@ -57,6 +94,7 @@ def configure(args):
 def stage(args):
     record_path = ROOT / ".release-sdk/last-release.json"
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    notes = release_notes(head)
     firmware, record = assembler.load_firmware(record_path, head)
     ident = manifest.read_identity(firmware)
     if ident["channel"] != CHANNELS[args.channel] or ident["build"] != args.build:
@@ -68,11 +106,13 @@ def stage(args):
     record["artifact"] = "guarded.tar.gz"
     (args.directory / "record.json").write_text(json.dumps(record, indent=2) + "\n")
     (args.directory / "firmware.bin").write_bytes(firmware)
+    (args.directory / "RELEASE-NOTES.md").write_text(notes)
 
 
 def package(args):
     require_event(os.environ)
     head = os.environ["GITHUB_SHA"]
+    check_staged_notes(args.directory, head)
     record_path = args.directory / "record.json"
     record = json.loads(record_path.read_text())
     if record["artifact"] != "guarded.tar.gz":
@@ -132,6 +172,7 @@ def publish(args):
     if args.channel == "stable" and (os.environ["GITHUB_EVENT_NAME"] != "workflow_dispatch"
                                      or os.environ.get("GITHUB_ACTOR") != "SemonCat"):
         raise ValueError("stable publication requires an owner dispatch")
+    check_staged_notes(args.directory, os.environ["GITHUB_SHA"])
     # gh list paginates up to this explicit bound; refuse at the limit rather than silently omit.
     releases = json.loads(gh("release", "list", "--repo", REPOSITORY, "--limit", "10000",
                             "--json", "tagName"))
@@ -146,21 +187,23 @@ def publish(args):
     gh("release", "create", tag, *assets, "--repo", REPOSITORY, "--target", os.environ["GITHUB_SHA"],
        # Display only: nightly is titled exactly "nightly"; the unique tag carries the build.
        "--title", "nightly" if args.channel == "nightly" else f"OrbitInk {args.channel} build {args.build}",
-       "--notes-file", str(args.directory / "README-zh-TW.md"),
+       "--notes-file", str(args.directory / "RELEASE-NOTES.md"),
        "--prerelease" if args.channel == "nightly" else "--latest",
        *(["--latest=false"] if args.channel == "nightly" else []))
     if args.channel == "nightly":
         if not any(item["tagName"] == "nightly" for item in releases):
             gh("release", "create", "nightly", "--repo", REPOSITORY, "--target", os.environ["GITHUB_SHA"],
-               "--title", "OrbitInk nightly channel", "--notes", "Experimental signed update channel.",
+               "--title", "OrbitInk nightly channel", "--notes-file", str(args.directory / "RELEASE-NOTES.md"),
                "--prerelease", "--latest=false")
         gh("release", "upload", "nightly", str(args.directory / "manifest.json"), "--clobber",
            "--repo", REPOSITORY)
+        gh("release", "edit", "nightly", "--repo", REPOSITORY,
+           "--notes-file", str(args.directory / "RELEASE-NOTES.md"))
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["configure", "stage", "package", "publish"])
+    parser.add_argument("command", choices=["configure", "stage", "package", "publish", "notes-hash"])
     parser.add_argument("--channel", choices=CHANNELS, default="nightly")
     parser.add_argument("--build", type=int)
     parser.add_argument("--version", default="")
@@ -168,6 +211,9 @@ def main():
     parser.add_argument("--directory", type=Path, default=ROOT / "dist/ci")
     args = parser.parse_args()
     try:
+        if args.command == "notes-hash":
+            print(notes_hash())
+            return 0
         globals()[args.command](args)
     except (ValueError, KeyError, OSError, subprocess.CalledProcessError, manifest.ManifestError) as error:
         print(f"orbitink_ci: {error}", file=sys.stderr)
