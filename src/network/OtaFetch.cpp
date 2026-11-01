@@ -36,10 +36,12 @@ bool sendRequest(freeink::SecureClient& c, const ota_http::Url& url, const char*
 }
 
 // Reads whatever is available into buf. Returns >0 bytes, 0 for "nothing yet", -1 for closed.
-int readSome(freeink::SecureClient& c, uint8_t* buf, const size_t cap) {
-  const int n = c.read(buf, cap);
-  if (n > 0) return n;
-  if (n < 0 || (!c.connected() && c.available() == 0)) return -1;
+int readSome(freeink::SecureClient& c, uint8_t* buf, const size_t cap, int& raw) {
+  raw = c.read(buf, cap);
+  if (raw > 0) return raw;
+  // The pinned SecureClient maps wolfSSL_get_error WANT_READ/WANT_WRITE to 0.
+  // Its -1 has already cleared the TLS session; retrying that session is unsafe.
+  if (raw < 0 || (!c.connected() && c.available() == 0)) return -1;
   return 0;
 }
 }  // namespace
@@ -83,7 +85,9 @@ struct HopState {
   int hop = -1;
   char host[sizeof(ota_diagnostics::Record::host)] = {};  // copied: the Url is freed on return
   uint64_t delivered = 0;  // body bytes handed to onData by this attempt
-  const char* stop = "";   // why a body ended early: the cases readSome() folds into "closed"
+  const char* stop = "";
+  bool retryable = false;  // only transport interruption, never HTTP/parser/policy/sink rejection
+  int readResult = 0;      // SecureClient result, NOT wolfSSL_get_error (not exposed by this SDK)
 };
 
 // `offset` > 0 resumes a download: the request carries "Range: bytes=offset-" and the final reply must
@@ -120,10 +124,14 @@ Result getImpl(const char* urlText, const char* userAgent, const size_t maxBytes
     client->setInsecure();  // authenticity is the signed manifest, see OtaFetch.h
     if (!client->connect(url->host, url->port)) {
       LOG_ERR("OTAF", "connect/handshake failed: %s", url->host);
+      at.retryable = true;
+      at.stop = "CONNECT_FAILED";
       return Result::CONNECT_FAILED;
     }
     if (!sendRequest(*client, *url, userAgent, offset)) {
       client->stop();
+      at.retryable = true;
+      at.stop = "WRITE_FAILED";
       return Result::WRITE_FAILED;
     }
 
@@ -133,13 +141,17 @@ Result getImpl(const char* urlText, const char* userAgent, const size_t maxBytes
     unsigned long idleSince = millis();
     while (head->status() == ota_http::ResponseHeadParser::Status::NEED_MORE) {
       resetTaskWatchdogIfSubscribed();
-      const int n = readSome(*client, buf.get(), 512);
+      const int n = readSome(*client, buf.get(), 512, at.readResult);
       if (n < 0) {
+        at.stop = at.readResult < 0 ? "HEADER_TLS_READ_ERROR" : "HEADER_PEER_CLOSED";
+        at.retryable = true;
         client->stop();
         return Result::BAD_RESPONSE;
       }
       if (n == 0) {
         if (millis() - idleSince > IDLE_TIMEOUT_MS) {
+          at.stop = "HEADER_IDLE";
+          at.retryable = true;
           client->stop();
           return Result::TIMEOUT;
         }
@@ -211,12 +223,10 @@ Result getImpl(const char* urlText, const char* userAgent, const size_t maxBytes
     idleSince = millis();
     while (remaining > 0) {
       resetTaskWatchdogIfSubscribed();
-      const int raw = client->read(buf.get(), remaining < CHUNK ? remaining : CHUNK);
-      const int n = raw > 0 ? raw : (raw < 0 || (!client->connected() && client->available() == 0)) ? -1 : 0;
+      const int n = readSome(*client, buf.get(), remaining < CHUNK ? remaining : CHUNK, at.readResult);
       if (n < 0) {
-        // raw < 0: wolfSSL read failed (fatal TLS/transport error). raw == 0 with no connection: the
-        // peer ended TLS cleanly (close_notify) or the TCP socket dropped without one.
-        at.stop = raw < 0 ? "TLS_READ_ERROR" : "PEER_CLOSED";
+        at.stop = at.readResult < 0 ? "TLS_READ_ERROR" : "PEER_CLOSED";
+        at.retryable = true;
         client->stop();
         LOG_ERR("OTAF", "%s with %u bytes outstanding", at.stop, static_cast<unsigned>(remaining));
         return Result::TRUNCATED;
@@ -224,6 +234,7 @@ Result getImpl(const char* urlText, const char* userAgent, const size_t maxBytes
       if (n == 0) {
         if (millis() - idleSince > IDLE_TIMEOUT_MS) {
           at.stop = "BODY_IDLE";
+          at.retryable = true;
           client->stop();
           return Result::TIMEOUT;
         }
@@ -252,6 +263,7 @@ void fillFailure(ota_diagnostics::Record* diag, const HopState& at, const int* l
   diag->httpStatus = lastStatus ? *lastStatus : 0;
   diag->freeHeap = ESP.getFreeHeap();
   diag->maxAlloc = ESP.getMaxAllocHeap();
+  diag->clientReadResult = at.readResult;
   if (at.stop[0] != '\0') diag->detail = at.stop;
 }
 }  // namespace
@@ -269,6 +281,7 @@ Result getResumable(const char* urlText, const char* userAgent, const size_t exp
   if (expectedLength == 0) return Result::BAD_URL;  // resume needs the signed total to validate against
   uint64_t delivered = 0;
   int resumes = 0;
+  int noProgressAttempts = 0;
   while (true) {
     HopState at;
     const uint64_t before = delivered;
@@ -277,9 +290,17 @@ Result getResumable(const char* urlText, const char* userAgent, const size_t exp
     delivered += at.delivered;
     if (diag) diag->resumes = static_cast<uint8_t>(resumes);
     if (result == Result::OK) return result;
-    // Only a body that stopped part-way is resumed, and only while each attempt still makes progress.
-    const bool interrupted = result == Result::TRUNCATED || result == Result::TIMEOUT;
-    if (!interrupted || !ota_http::shouldResume(resumes, before, delivered, expectedLength)) {
+    noProgressAttempts = delivered == before ? noProgressAttempts + 1 : 0;
+    if (diag) {
+      diag->noProgressAttempts = static_cast<uint8_t>(noProgressAttempts);
+      diag->attemptBytes = static_cast<uint32_t>(at.delivered);
+    }
+    if (!at.retryable || !ota_http::shouldResume(resumes, noProgressAttempts, delivered, expectedLength)) {
+      if (diag) {
+        diag->retryStop = !at.retryable ? "NOT_RETRYABLE"
+                         : resumes >= ota_http::MAX_RESUMES ? "RESUME_LIMIT"
+                                                           : "NO_PROGRESS_LIMIT";
+      }
       fillFailure(diag, at, lastStatus);
       return result;
     }

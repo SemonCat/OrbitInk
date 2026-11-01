@@ -300,3 +300,31 @@ TEST(OtaDiagnostics, WrapsSummaryIntoBoundedStackLines) {
   for (const auto& line : lines) EXPECT_LE(strlen(line), ota_diagnostics::WRAP_LINE_CHARS);
   EXPECT_EQ(ota_diagnostics::wrap("", lines, ota_diagnostics::WRAP_MAX_LINES), 0u);
 }
+
+TEST(OtaDiagnostics, RetryReportRetainsFinalFieldsWithinBoundedBuffer) {
+  ota_diagnostics::Record r;
+  r.phase = ota_diagnostics::Phase::DOWNLOAD;
+  r.error = "BAD_RESPONSE";
+  r.detail = "HEADER_TLS_READ_ERROR";
+  r.httpStatus = 206;
+  r.hop = 4;
+  r.setHost("release-assets.githubusercontent.com");
+  r.resumes = 3;
+  r.noProgressAttempts = 2;
+  r.attemptBytes = 49152;
+  r.clientReadResult = -1;
+  r.retryStop = "NO_PROGRESS_LIMIT";
+  r.bytesDone = 49152;
+  r.bytesTotal = 5907424;
+  r.freeHeap = 46860;
+  r.maxAlloc = 27636;
+  char text[ota_diagnostics::REPORT_MAX];
+  const size_t len = ota_diagnostics::report(
+      r, "CrossFade-OTA/orbitink-x3-nightly/x3-zh-TW/build=4294967295", "1.3.3", text, sizeof(text));
+  ASSERT_LT(len, sizeof(text) - 1);
+  const std::string report(text, len);
+  EXPECT_NE(report.find("Last attempt bytes: 49152\n"), std::string::npos);
+  EXPECT_NE(report.find("No-progress attempts: 2\n"), std::string::npos);
+  EXPECT_NE(report.find("Client read: -1\n"), std::string::npos);
+  EXPECT_EQ(report.substr(report.size() - 30), "Retry stop: NO_PROGRESS_LIMIT\n");
+}

@@ -42,11 +42,15 @@ struct Record {
   int httpStatus = 0;
   int hop = -1;             // redirect hop that failed, -1 if not a network failure
   uint8_t resumes = 0;      // firmware download range resumes used before the failure
+  uint8_t noProgressAttempts = 0;
+  uint32_t attemptBytes = 0;
+  int clientReadResult = 0;  // wrapper result; underlying wolfSSL error is unavailable
+  const char* retryStop = "";
   char host[48] = {};       // host of the failing hop
   uint32_t bytesDone = 0;   // firmware bytes received / written before the failure
   uint32_t bytesTotal = 0;
-  uint32_t freeHeap = 0;    // at the failure
-  uint32_t maxAlloc = 0;    // largest free block at the failure (TLS needs a large contiguous one)
+  uint32_t freeHeap = 0;    // fetch failures sample after the hop's client/parser are destroyed
+  uint32_t maxAlloc = 0;    // largest free block at that time, not a TLS-session low-water mark
 
   bool failed() const { return phase != Phase::NONE; }
 
@@ -58,7 +62,7 @@ struct Record {
 // Formatting writes into caller-owned buffers: this runs right after OOM failures, and on the
 // -fno-exceptions device a failed std::string allocation would abort instead of reporting.
 constexpr size_t SUMMARY_MAX = 160;
-constexpr size_t REPORT_MAX = 512;
+constexpr size_t REPORT_MAX = 768;
 
 // One short ASCII line for the e-paper failure screen, e.g.
 // "DOWNLOAD CONNECT_FAILED hop1 release-assets.githubusercontent.com heap 41234/18432".
@@ -115,11 +119,13 @@ inline size_t report(const Record& r, const char* identity, const char* version,
   summary(r, line, sizeof(line));
   const int w = snprintf(out, cap,
                          "OrbitInk OTA failure\nRunning: %s (%s)\nSummary: %s\nPhase: %s\nError: %s\nDetail: %s\n"
-                         "HTTP status: %d\nHop: %d\nHost: %s\nResumes: %u\nBytes: %u/%u\nFree heap: %u\nLargest free block: %u\n",
+                         "HTTP status: %d\nHop: %d\nHost: %s\nResumes: %u\nBytes: %u/%u\nFree heap: %u\nLargest free block: %u\n"
+                         "Last attempt bytes: %u\nNo-progress attempts: %u\nClient read: %d\nRetry stop: %s\n",
                          identity ? identity : "", version ? version : "", line, phaseName(r.phase), r.error, r.detail,
                          r.httpStatus, r.hop, r.host, static_cast<unsigned>(r.resumes), static_cast<unsigned>(r.bytesDone),
                          static_cast<unsigned>(r.bytesTotal), static_cast<unsigned>(r.freeHeap),
-                         static_cast<unsigned>(r.maxAlloc));
+                         static_cast<unsigned>(r.maxAlloc), static_cast<unsigned>(r.attemptBytes),
+                         static_cast<unsigned>(r.noProgressAttempts), r.clientReadResult, r.retryStop);
   if (w < 0) return 0;
   return static_cast<size_t>(w) < cap ? static_cast<size_t>(w) : cap - 1;
 }

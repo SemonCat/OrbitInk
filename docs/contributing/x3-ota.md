@@ -128,6 +128,9 @@ sources and their actual notices remain part of the corresponding build inputs.
 
 ## Verification
 
+For the build2001 interrupted TLS download, bounded retry policy and practical
+manual recovery, see [x3-ota-recovery.md](x3-ota-recovery.md).
+
 ```sh
 cmake --build /tmp/x3ota-host -j 8
 ctest --test-dir /tmp/x3ota-host --output-on-failure

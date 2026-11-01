@@ -78,12 +78,13 @@ enum class Continuation : uint8_t {
 Continuation checkContinuation(const ResponseHeadParser& head, uint64_t offset, uint64_t total);
 const char* continuationName(Continuation c);
 
-// Resume budget: at most MAX_RESUMES extra requests per download, and each only after the previous
-// attempt delivered new bytes (a server that keeps failing at the same point is not retried forever).
+// At most three extra requests, including retries before any body bytes arrive.
+// One no-progress failure may recover; a second consecutive one stops early.
 constexpr int MAX_RESUMES = 3;
-inline bool shouldResume(const int resumesSoFar, const uint64_t deliveredBefore, const uint64_t deliveredNow,
+constexpr int MAX_NO_PROGRESS_ATTEMPTS = 2;
+inline bool shouldResume(const int resumesSoFar, const int noProgressAttempts, const uint64_t deliveredNow,
                          const uint64_t total) {
-  return resumesSoFar < MAX_RESUMES && deliveredNow > deliveredBefore && deliveredNow < total;
+  return resumesSoFar < MAX_RESUMES && noProgressAttempts < MAX_NO_PROGRESS_ATTEMPTS && deliveredNow < total;
 }
 
 struct Url {

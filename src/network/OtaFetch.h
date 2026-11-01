@@ -31,7 +31,7 @@ enum class Result : uint8_t {
   CONNECT_FAILED,
   WRITE_FAILED,
   TIMEOUT,
-  BAD_RESPONSE,  // unparsable / oversized head
+  BAD_RESPONSE,  // interrupted / unparsable / oversized head, or invalid continuation
   HTTP_STATUS,   // non-200 final status (see lastStatus)
   TOO_MANY_REDIRECTS,
   NO_LENGTH,     // missing Content-Length or chunked encoding
@@ -54,14 +54,16 @@ using DataFn = bool (*)(const uint8_t* data, size_t len, void* ctx);
 Result get(const char* url, const char* userAgent, size_t maxBytes, size_t expectedLength, DataFn onData, void* ctx,
            int* lastStatus = nullptr, ota_diagnostics::Record* diag = nullptr);
 
-// Firmware download of exactly `expectedLength` bytes (the signed size). When the body stops part-way
-// (TRUNCATED or TIMEOUT) after delivering new bytes, the request is re-issued from `url` -- fresh
+// Firmware download of exactly `expectedLength` bytes (the signed size). On transport interruption
+// in connect/request/header/body, the request is re-issued from `url` -- fresh
 // redirect walk, since signed asset Locations expire -- with "Range: bytes=<delivered>-", and only a
 // 206 continuing at exactly that offset of the same object is accepted (ota_http::checkContinuation).
-// At most ota_http::MAX_RESUMES resumes. `onData` therefore sees one contiguous byte stream, and the
+// At most ota_http::MAX_RESUMES extra requests, stopping after two consecutive no-progress failures.
+// Zero delivered bytes uses a fresh 200; partial delivery requires the exact 206 continuation.
+// Parser/HTTP/range/origin/sink rejections are never retried. `onData` sees one contiguous byte stream, and the
 // caller's own size/SHA-256/image validation covers every byte; nothing partial is ever accepted.
-// `diag->detail` names why the last attempt's body stopped (PEER_CLOSED, TLS_READ_ERROR, BODY_IDLE,
-// RESUME_BAD_*), `diag->resumes` how many resumes ran.
+// `diag->detail` names why the last attempt stopped (HEADER_*, PEER_CLOSED, TLS_READ_ERROR, BODY_IDLE,
+// RESUME_BAD_*), `diag->resumes` how many extra requests ran, `retryStop` why retrying ended.
 Result getResumable(const char* url, const char* userAgent, size_t expectedLength, DataFn onData, void* ctx,
                     int* lastStatus = nullptr, ota_diagnostics::Record* diag = nullptr);
 

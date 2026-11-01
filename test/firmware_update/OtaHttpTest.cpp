@@ -252,11 +252,13 @@ TEST(OtaHttp, ContinuationAcceptsOnlyTheExactRemainderOfTheSameObject) {
   EXPECT_EQ(check("HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\n\r\n", offset), Continuation::BAD_STATUS);
 }
 
-TEST(OtaHttp, ResumeBudgetRequiresProgressAndIsBounded) {
+TEST(OtaHttp, ResumeBudgetAllowsOneNoProgressFailureAndIsBounded) {
   constexpr uint64_t total = 5924832;
   EXPECT_TRUE(ota_http::shouldResume(0, 0, 2374342, total));
-  EXPECT_FALSE(ota_http::shouldResume(0, 2374342, 2374342, total));  // no new bytes this attempt
-  EXPECT_FALSE(ota_http::shouldResume(0, 0, total, total));          // nothing left
-  EXPECT_TRUE(ota_http::shouldResume(ota_http::MAX_RESUMES - 1, 10, 20, total));
-  EXPECT_FALSE(ota_http::shouldResume(ota_http::MAX_RESUMES, 10, 20, total));
+  EXPECT_TRUE(ota_http::shouldResume(1, 1, 2374342, total));  // one failed continuation may recover
+  EXPECT_FALSE(ota_http::shouldResume(2, 2, 2374342, total));
+  EXPECT_TRUE(ota_http::shouldResume(0, 1, 0, total));        // initial header can be interrupted
+  EXPECT_FALSE(ota_http::shouldResume(0, 0, total, total));   // nothing left
+  EXPECT_TRUE(ota_http::shouldResume(ota_http::MAX_RESUMES - 1, 0, 20, total));
+  EXPECT_FALSE(ota_http::shouldResume(ota_http::MAX_RESUMES, 0, 20, total));
 }
