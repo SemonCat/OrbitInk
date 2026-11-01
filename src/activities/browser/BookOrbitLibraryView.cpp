@@ -12,7 +12,7 @@
 #include "fontIds.h"
 
 namespace {
-using Client = BookOrbitCatalogClient;
+using CatalogClient = BookOrbitCatalogClient;
 constexpr const char* TABS[] = {"", "reading", "unread", "finished"};
 
 const char* tabLabel(int tab) {
@@ -65,7 +65,7 @@ void BookOrbitCatalogBrowserActivity::changeTab(int tab) {
   // Downloaded entries contain no authoritative reading state. Selecting a status
   // explicitly returns to the server catalog; never label local-only rows "All".
   if (listKind == ListKind::DOWNLOADED) {
-    currentQuery = Client::BookQuery{};
+    currentQuery = CatalogClient::BookQuery{};
     currentQuery.sort = "title";
     location = tr(STR_BO_ALL_BOOKS);
   }
@@ -132,7 +132,7 @@ void BookOrbitCatalogBrowserActivity::fetchVisibleCover() {
   }
 }
 
-void BookOrbitCatalogBrowserActivity::renderCover(const Client::BookSummary& book, int x, int y, int w, int h) {
+void BookOrbitCatalogBrowserActivity::renderCover(const CatalogClient::BookSummary& book, int x, int y, int w, int h) {
   renderer.drawRect(x, y, w, h, 1);
   bool rendered = false;
   if (coverCache && coverCache->available(book.id)) {
@@ -198,7 +198,7 @@ void BookOrbitCatalogBrowserActivity::renderLibrary() {
   renderer.drawLine(20, 193, 508, 193);
 
   for (int i = first; i < end; ++i) {
-    Client::BookSummary book;
+    CatalogClient::BookSummary book;
     bool local;
     if (localOnly) {
       book.id = downloaded[i].bookId;
@@ -256,7 +256,7 @@ void BookOrbitCatalogBrowserActivity::renderLibrary() {
     notice = count;
   }
   text(renderer, 20, 701, notice, 18, 285);
-  const int offset = currentPage * Client::PAGE_SIZE;
+  const int offset = currentPage * CatalogClient::PAGE_SIZE;
   const std::string range = (itemCount() ? std::to_string(offset + first + 1) + "-" + std::to_string(offset + end) : "0") +
                             " / " + std::to_string(total);
   text(renderer, 345, 701, range, 18, 163);
