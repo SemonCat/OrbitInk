@@ -24,6 +24,8 @@ State "faults" (set by the smoke script between runs):
   {"stats_status": 503}      page-stats POSTs answer this status
   {"fail_once": "/plugin/catalog/books"}   the NEXT request to exactly this route fails at the
                              transport (status 0), then the fault clears itself
+  {"offline_requests": 3}    the next 3 requests (any route) fail at the transport, then the
+                             fault clears itself -- a network outage spanning several sync windows
 
 Page-stats responses follow BookOrbit's contract (results[{hash, accepted, duplicates}],
 unmatched[]); dedup key (deviceId, hash, page, startTime) mirrors the server's documented
@@ -101,6 +103,12 @@ def main() -> int:
         return 0
 
     if faults.get("offline"):
+        return finish(0)
+    if faults.get("offline_requests", 0) > 0:
+        faults["offline_requests"] -= 1
+        if faults["offline_requests"] == 0:
+            faults.pop("offline_requests")
+        entry["injected"] = "offline_requests"
         return finish(0)
     if faults.get("fail_once") and path == PREFIX + faults["fail_once"]:
         faults.pop("fail_once")  # one transport failure, then the route answers normally

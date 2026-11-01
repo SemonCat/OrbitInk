@@ -102,14 +102,16 @@ class HalPowerManager {
   // already handles. Declared here only -- never defined inline -- so it cannot depend on this
   // shadow's view of the object's private data.
   //
-  // Deliberate fidelity gap: the simulator has no RTC and no timer-driven wake path (see
-  // sim/CrossFadeSimHal/HalGPIO.h -- getWakeupReason() never returns WakeupReason::Timer), so
-  // `sleepDelayMicros` is accepted for signature compatibility and otherwise unused: this
-  // delegates to the pinned single-argument startDeepSleep(gpio), which blocks until a button
-  // wake or process-quit request. A host run that reaches this path will therefore sleep until
-  // manually woken rather than resuming after the real device's timer interval -- verify
-  // periodic-sync scheduling on device, not here.
+  // By default the delay is unused and this blocks for a button wake, exactly as before. With
+  // CROSSFADE_SIM_TIMER_DIVISOR set, a non-zero delay instead sleeps delay/divisor and relaunches
+  // the process as a timer wake (fresh memory, same SD card) -- see HalPowerManagerCompat.cpp and
+  // sim/README.md for the knobs and what this does and does not model.
   void startDeepSleep(HalGPIO &gpio, uint64_t sleepDelayMicros) const;
+
+  // Mirrors lib/hal/HalPowerManager.h. The RTC slow memory is modeled by the environment the
+  // relaunch inherits; a fresh launch is a power-on and reads 0. Static: no layout change.
+  static uint64_t retainedTimerDelayMicros();
+  static uint32_t retainedSleepCycles();
 };
 
 // Layout guard. This pins the size of *this* declaration, which is the one thing a future edit is

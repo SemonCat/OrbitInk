@@ -26,8 +26,8 @@ Scenarios:
   E  BookOrbit not configured: the Library tile becomes 設定 BookOrbit and opens its settings
 
 Not covered here, and why: the WiFi heap-defrag reboot (ESP.restart is a no-op in the simulator)
-and the periodic timer wake (the simulator has no timer wake source) -- both have host tests
-(test/bookorbit_sync) and remain device-verification items. Nothing here measures RAM, e-ink
+has host tests (test/bookorbit_sync) and remains a device-verification item; the periodic timer wake
+has its own accelerated suite, scripts/sim_periodic_sync_smoke.py. Nothing here measures RAM, e-ink
 waveforms, WiFi, TLS or power.
 """
 

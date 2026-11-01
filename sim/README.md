@@ -33,6 +33,8 @@ directory and will discard edits on the next refetch), the difference is carried
 | `CrossFadeSimHal/SecureHttpClient.h` | full replacement | No simulator translation unit includes this header, so replacing it outright leaves exactly one definition in the program. |
 | `CrossFadeSimHal/HalClock.h` | **superset shadow** | Adds `getEpochMinutes()` to a class. |
 | `CrossFadeSimHal/HalStorage.h` | **superset shadow** | Adds `PathStatus`/`probePath()` to `HalStorage` and `getModifyTime()`/`getError()` to `HalFile`. |
+| `CrossFadeSimHal/HalGPIO.h` | **superset shadow** + alias | Adds `WakeupReason::Timer` and `crossfadeWakeupReason()`; a `getWakeupReason` macro routes the firmware's calls to it (the simulator's own `.cpp` keeps its definition). |
+| `CrossFadeSimHal/HalPowerManager.h` | **superset shadow** | Adds `startDeepSleep(HalGPIO&, uint64_t)` and the static RTC accessors `retainedTimerDelayMicros()`/`retainedSleepCycles()`. |
 
 The `*Compat.cpp` files hold the definitions for the added members. Each one is written against the
 simulator's **public** API only — never its private state — so the implementations stay correct
@@ -92,6 +94,25 @@ If a piece of this divergence ever lands in upstream CrossPoint, the simulator w
 the corresponding shadow can be deleted. The `#include_next` and forwarder files are the shapes to
 prefer whenever a new gap allows them; a shadow is the last resort.
 
+## Accelerated timer wake (periodic sync)
+
+`HalPowerManagerCompat.cpp` can run the device's unattended overnight cycle on the host. It is off
+unless `CROSSFADE_SIM_TIMER_DIVISOR` is set; without it a timer delay is ignored and sleep waits for
+a button, exactly as before.
+
+| Variable | Effect |
+|---|---|
+| `CROSSFADE_SIM_TIMER_DIVISOR=N` | A non-zero armed delay sleeps `delay/N`, then relaunches the program as a timer wake: `execvp` through the pinned `SimulatorLifecycle::rebootAsPowerWake()`, so memory is fresh and the SD directory is kept, which is what a deep-sleep reset is to firmware state. The production `setup()` → headless sync → `startDeepSleep()` route then runs unmodified. |
+| `CROSSFADE_SIM_TIMER_MAX_WAKES=K` | Bounds the run: after K relaunches, or when a sleep arms nothing, the process exits 0. |
+| `CROSSFADE_SIM_TIMER_HEAP_SCHEDULE=free:largest,-,...` | Sets the simulator's existing `CROSSPOINT_SIM_FREE_HEAP`/`MAX_ALLOC_HEAP` for each relaunch in turn (`-` = unset). |
+| `CROSSFADE_SIM_TIMER_TRACE=/abs/path` | One line per sleep: wall time, the exact `uint64` delay armed, and what the adapter did. |
+
+RTC slow memory (the retained armed delay and the sleep-cycle counter) is modeled by environment
+variables the relaunch inherits, so a fresh launch is a power-on. A timer relaunch parks the
+`*_AFTER_WAKE` input/screenshot schedules that `rebootAsPowerWake()` would otherwise promote onto it,
+and hands them back to the eventual button wake. The accelerated wait is not interruptible by
+buttons. `scripts/sim_periodic_sync_smoke.py` drives all of this against the fixture bridge.
+
 ## Deliberate fidelity gaps
 
 These are simplifications, not oversights, and each is commented at its definition:
@@ -108,6 +129,12 @@ These are simplifications, not oversights, and each is commented at its definiti
 - **`getModifyTime()` reports no timestamp**, so `LibraryScanner` falls back to size-only change
   detection — the same fallback the device already uses for files this firmware wrote itself.
 - **`recordBootIdentity()` is a no-op**, so the panic-recovery boot path cannot be reached here.
+- **Heap figures are static per process.** `CROSSPOINT_SIM_FREE_HEAP`/`MAX_ALLOC_HEAP` (or the timer
+  heap schedule) are chosen numbers that every heap query returns unchanged. They exercise the
+  production gate and its branches; they do not track allocations, fragmentation, wolfSSL/TLS or
+  WiFi-driver memory.
+- **WiFi association is instant** and the RTC timer, X3 power rails, battery and USB are not
+  emulated, so connect budgets and whether a timer fires on battery are device questions.
 
 Anything in that list has to be verified on device or through the host gtest suites under `test/`.
 The simulator is for UI iteration, not for these.

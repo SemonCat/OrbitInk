@@ -27,11 +27,12 @@
 // class" the way sim/README.md prescribes for real added members -- there is no member here to
 // append.
 //
-// The simulator's getWakeupReason() (defined in its own .cpp, unmodified) never returns Timer: the
-// host has no RTC/timer-driven wake path to synthesize one from. That call site's `if` is therefore
-// always false on the simulator -- a deliberate fidelity gap, not a bug. It exists so callers that
-// unconditionally compare against HalGPIO::WakeupReason::Timer (main.cpp does, without an #ifdef)
-// still compile and link on the host.
+// The simulator's getWakeupReason() (defined in its own .cpp, unmodified) never returns Timer. The
+// owned crossfadeWakeupReason() below does, for a process that HalPowerManagerCompat.cpp relaunched
+// from an accelerated timer sleep (opt-in, see sim/README.md); otherwise it returns exactly what the
+// simulator's own function returns. The firmware reaches it through the getWakeupReason macro at
+// the end of this file -- a member's definition cannot be replaced from outside the dependency, and
+// the simulator's own translation units never include this header, so they are unaffected.
 //
 // See sim/README.md.
 
@@ -143,6 +144,8 @@ class HalGPIO {
   enum class WakeupReason { PowerButton, AfterFlash, AfterUSBPower, Other, Timer };
 
   WakeupReason getWakeupReason() const;
+  // Defined in HalGPIOCompat.cpp. Non-virtual and not a data member, so the layout is unchanged.
+  WakeupReason crossfadeWakeupReason() const;
 
   // Button indices
   static constexpr uint8_t BTN_BACK = 0;
@@ -164,3 +167,6 @@ extern HalGPIO gpio;  // Singleton
 static_assert(sizeof(HalGPIO) == 1,
               "HalGPIO layout changed: re-diff against the pinned crosspoint-simulator's "
               "src/HalGPIO.h -- never against lib/hal/HalGPIO.h.");
+
+// Firmware calls `gpio.getWakeupReason()` (src/main.cpp); route them to the timer-aware member.
+#define getWakeupReason crossfadeWakeupReason
