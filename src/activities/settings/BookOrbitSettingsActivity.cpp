@@ -113,8 +113,7 @@ void BookOrbitSettingsActivity::handleSelection() {
         });
   } else if (selectedIndex == 2) {
     // Server URL -- BookOrbit is self-hosted only, no default to fall back to, so prefill with
-    // https:// (its own normalization defaults to that scheme) rather than the current value's
-    // http:// alternative KOReaderSettingsActivity offers.
+    // https:// (its own normalization defaults to that scheme).
     const std::string currentUrl = BOOKORBIT_STORE.getServerUrl();
     const std::string prefillUrl = currentUrl.empty() ? "https://" : currentUrl;
     startActivityForResult(std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_BOOKORBIT_SERVER_URL),

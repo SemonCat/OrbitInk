@@ -31,9 +31,7 @@
 #include "EpubReaderPercentSelectionActivity.h"
 #include "EpubReaderUtils.h"
 #include "FinishedBooksStore.h"
-#include "KOReaderCredentialStore.h"
 #include "KOReaderDocumentId.h"
-#include "KOReaderSyncActivity.h"
 #include "MappedInputManager.h"
 #include "PinnedBookStore.h"
 #include "ProgressMapper.h"
@@ -721,16 +719,6 @@ void EpubReaderActivity::loop() {
           requestUpdate();
         }
         break;
-      case CrossPointSettings::LP_MENU_KOSYNC:
-        // Hold ~1s launches KOReader sync. If sync can't run (no credentials stored), fall
-        // through so the normal Confirm-release still opens the reader menu.
-        if (mappedInput.getHeldTime() >= ReaderUtils::GO_HOME_MS) {
-          if (launchKOReaderSync()) {
-            ignoreNextConfirmRelease = true;  // sync launched or error shown; suppress menu open
-            return;
-          }
-        }
-        break;
       case CrossPointSettings::LP_MENU_DICTIONARY:
         // Hold ~0.4s starts dictionary word selection on the current page.
         if (mappedInput.getHeldTime() >= ReaderUtils::BOOKMARK_HOLD_MS && !showDictionaryMessage) {
@@ -1093,10 +1081,6 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       requestUpdate();
       break;
     }
-    case EpubReaderMenuActivity::MenuAction::SYNC: {
-      launchKOReaderSync();
-      break;
-    }
     case EpubReaderMenuActivity::MenuAction::BOOKMARKS: {
       startActivityForResult(
           std::make_unique<EpubReaderBookmarksActivity>(renderer, mappedInput, epub, epub->getPath()),
@@ -1123,75 +1107,6 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       break;
     }
   }
-}
-
-bool EpubReaderActivity::launchKOReaderSync() {
-  if (!KOREADER_STORE.hasCredentials()) return false;  // no-op: nothing to launch
-
-  const int currentPage = section ? section->currentPage : nextPageNumber;
-  const int totalPages = section ? section->estimatedTotalPages() : cachedChapterTotalPageCount;
-  std::optional<uint16_t> paragraphIndex;
-  if (section && currentPage >= 0 && currentPage < section->pageCount) {
-    const uint16_t paragraphPage =
-        currentPage > 0 ? static_cast<uint16_t>(currentPage - 1) : static_cast<uint16_t>(currentPage);
-    if (const auto pIdx = section->getParagraphIndexForPage(paragraphPage)) {
-      paragraphIndex = *pIdx;
-    }
-  }
-
-  // Force-release retained SD-font mini-bitmap/kern/overflow data before the mapping call
-  // below: toSavedProgress() can do further EPUB parsing/inflate work while the Epub is still
-  // fully resident (see the full release a few lines down), and a retained CJK page bitmap
-  // (up to ~20KB for the 1-bit 28pt profile) competing with that allocation is exactly the
-  // failure this device hit before any WiFi/TLS code ever ran. Coverage/metrics/persistent
-  // kern-ligature/advance tables are untouched -- see FontCacheManager::forceReleaseTransientCaches().
-  if (auto* fcm = renderer.getFontCacheManager()) fcm->forceReleaseTransientCaches();
-
-  // Pre-compute local KO position and chapter name while Epub is still in RAM.
-  CrossPointPosition localPos = getCurrentPosition();
-  SavedProgressPosition localKoPos = ProgressMapper::toSavedProgress(epub, localPos);
-  const int tocIdx = epub->getTocIndexForSpineIndex(currentSpineIndex);
-  std::string localChapterName = (tocIdx >= 0) ? epub->getTocItem(tocIdx).title : "";
-  const std::string savedEpubPath = epub->getPath();
-
-  // Persist current position so the reader resumes at the right page on return, and so KOSync
-  // never reads/uploads a stale value. Unconditional -- bypasses ProgressDebounce's cadence, same
-  // as any other hard flush point. goToReader() depends on this file, so abort sync on failure.
-  if (!saveProgress(currentSpineIndex, currentPage, totalPages)) {
-    LOG_ERR("KOSync", "Aborting sync because current progress could not be saved");
-    pendingSyncSaveError = true;
-    requestUpdate();
-    return true;  // acted: surfaced a save error to the user
-  }
-  progressDebounce.markFlushed();
-
-  // Commit the reading-stats session NOW, while epub and section are still alive. The release
-  // below happens before ActivityManager ever calls onExit(), so onExit()'s own commit -- which
-  // needs both objects -- would find them gone and silently drop this whole session: its reading
-  // time, its session count, and every buffered BookOrbit event. The latch inside makes the
-  // later onExit() call a no-op rather than a double count.
-  finalizeReadingStatsSession();
-
-  // Release Epub and Section to free ~65KB RAM for the TLS handshake.
-  LOG_DBG("KOSync", "Releasing epub for sync (heap before: %u)", (unsigned)ESP.getFreeHeap());
-  {
-    RenderLock lock(*this);
-    if (section) {
-      nextPageNumber = section->currentPage;
-    }
-    // The image extractor holds a raw pointer into this epub (see onEnter);
-    // clear it before the early release, mirroring onExit(), or a later image
-    // render would call through a dangling context.
-    ImageBlock::setExtractor(nullptr, nullptr);
-    section.reset();
-    epub.reset();
-  }
-  LOG_DBG("KOSync", "Epub released (heap after: %u)", (unsigned)ESP.getFreeHeap());
-
-  activityManager.replaceActivity(std::make_unique<KOReaderSyncActivity>(
-      renderer, mappedInput, savedEpubPath, currentSpineIndex, currentPage, totalPages, std::move(localKoPos),
-      progressEventTimestamp, progressIsLegacy, std::move(localChapterName), paragraphIndex));
-  return true;  // acted: launched the sync activity
 }
 
 void EpubReaderActivity::applyOrientation(const uint8_t orientation) {
@@ -1450,12 +1365,6 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     return;
   }
 
-  const auto showPendingSyncSaveError = [this]() {
-    if (!pendingSyncSaveError) return;
-    pendingSyncSaveError = false;
-    GUI.drawPopup(renderer, tr(STR_SAVE_PROGRESS_FAILED));
-  };
-
   // A section build failure (e.g. an invalid/corrupt EPUB that fails XML parsing) leaves the
   // "Indexing" popup on screen with no way forward. Surface an explicit error instead of hanging.
   // clearScreen first so the error popup doesn't overlay the stale "Indexing" popup.
@@ -1489,7 +1398,6 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     if (lock.isStale()) return;
     renderer.displayBuffer();
     automaticPageTurnActive = false;
-    showPendingSyncSaveError();
     return;
   }
 
@@ -1797,7 +1705,6 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     renderStatusBar();
     renderer.displayBuffer();
     automaticPageTurnActive = false;
-    showPendingSyncSaveError();
     return;
   }
 
@@ -1807,7 +1714,6 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     renderStatusBar();
     renderer.displayBuffer();
     automaticPageTurnActive = false;
-    showPendingSyncSaveError();
     return;
   }
 
@@ -1835,11 +1741,9 @@ void EpubReaderActivity::render(RenderLock&& lock) {
         renderer.clearScreen();
         renderer.drawCenteredText(UI_12_FONT_ID, 300, tr(STR_PAGE_LOAD_ERROR), true, EpdFontFamily::BOLD);
         renderer.displayBuffer();
-        showPendingSyncSaveError();
         return;
       }
       requestUpdate();  // Try again after clearing cache
-      showPendingSyncSaveError();
       return;
     }
     pageLoadRetryCount = 0;  // Reset the retry counter once a page loads cleanly
@@ -1884,7 +1788,6 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   }
 
   if (lock.isStale()) return;
-  showPendingSyncSaveError();
 
   if (pendingScreenshot) {
     if (lock.isStale()) return;

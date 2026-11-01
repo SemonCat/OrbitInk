@@ -41,7 +41,6 @@
 #include "util/BookOrbitAutoSync.h"
 #include "util/BookOrbitMigration.h"
 #include "util/ButtonNavigator.h"
-#include "util/KOReaderAutoSync.h"
 #include "util/ProgressSyncNetwork.h"
 #include "util/ProgressSyncDeferred.h"
 #include "util/ProgressSyncReceipt.h"
@@ -272,7 +271,6 @@ void enterDeepSleep(bool fromTimeout = false) {
   ProgressSyncReceipt::begin(ProgressSyncReceipt::Trigger::Sleep);
   {
     ProgressSyncNetwork::Batch syncBatch(APP_STATE.openEpubPath, &renderer);
-    KOReaderAutoSync::syncOnSleep(renderer);
     BookOrbitAutoSync::syncOnSleep(renderer);
   }
 
@@ -356,8 +354,7 @@ static void synchronizeProgressHeadlessly() {
   // Evaluated in order and all-or-nothing: a partial load would read as "no WiFi" or "no
   // credentials" and silently stop the schedule.
   const bool storesReady = storageReady && APP_STATE.loadFromFile() && loadedOrAbsent(SETTINGS) &&
-                           loadedOrAbsent(WIFI_STORE) && loadedOrAbsent(KOREADER_STORE) &&
-                           loadedOrAbsent(BOOKORBIT_STORE);
+                           loadedOrAbsent(WIFI_STORE) && loadedOrAbsent(BOOKORBIT_STORE);
   if (storesReady) {
     if (ProgressSyncRetry::sleepDelayMicros() != 0) {
       // Optional RTC access preserves the shared success timestamp; it does not
@@ -365,7 +362,6 @@ static void synchronizeProgressHeadlessly() {
       halClock.begin();
       const std::string path = APP_STATE.openEpubPath;
       ProgressSyncNetwork::Batch syncBatch(path, nullptr, ProgressSyncNetwork::UNATTENDED_CONNECT_BUDGET_MS);
-      KOReaderAutoSync::syncHeadlessly(path);
       BookOrbitAutoSync::syncHeadlessly(path);
       nextSyncDelayMicros = ProgressSyncRetry::sleepDelayMicros();
     }
@@ -446,6 +442,8 @@ void setup() {
   PINNED_BOOK.loadFromFile();
   WIFI_STORE.loadFromFile();
   I18N.setLanguage(static_cast<Language>(SETTINGS.language));
+  // koreader.json is read only by the one-shot BookOrbitMigration below (an older build's
+  // opportunistic BookOrbit detection); no KOSync provider runs in this product.
   KOREADER_STORE.loadFromFile();
   BOOKORBIT_STORE.loadFromFile();
   BookOrbitMigration::runOnce();

@@ -128,7 +128,6 @@ class EpubReaderActivity final : public Activity {
   // Normalized 0.0-1.0 progress within the target spine item, computed from book percentage.
   float pendingSpineProgress = 0.0f;
   bool pendingScreenshot = false;
-  bool pendingSyncSaveError = false;
   // Consecutive page-load failures. Each failure drops the section and rebuilds on the next render,
   // which recovers a transiently corrupt cache; capped so a persistently bad page can't spin forever.
   uint8_t pageLoadRetryCount = 0;
@@ -193,8 +192,8 @@ class EpubReaderActivity final : public Activity {
   int lastObservedPage = -1;
   int lastObservedPageCount = -1;
   // Debounces the progress.bin write itself (see ProgressDebounce.h for the flush policy).
-  // Callers must still force an unconditional flush before exit/sleep/book-transition/KOSync --
-  // see onExit() and launchKOReaderSync().
+  // Callers must still force an unconditional flush before exit/sleep/book-transition -- see
+  // onExit().
   ProgressDebounce progressDebounce;
   // Origin time of the last genuine logical navigation. It is loaded from progress.bin and
   // reused by every open/close/retry/layout save. A navigation with unavailable/backwards RTC
@@ -311,9 +310,6 @@ class EpubReaderActivity final : public Activity {
   // Opens the reader menu for the current position (short-press Confirm)
   void openReaderMenu();
   void openDictionaryWordSelect();
-  // Returns true if sync acted (launched, or surfaced a save error); false if it was a no-op
-  // because no KOReader credentials are stored.
-  bool launchKOReaderSync();
   void applyOrientation(uint8_t orientation);
   void toggleAutoPageTurn(uint8_t selectedPageTurnOption);
   void pageTurn(bool isForwardTurn);

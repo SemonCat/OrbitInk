@@ -13,7 +13,6 @@
 #include "ClearCacheActivity.h"
 #include "CrossPointSettings.h"
 #include "FontDownloadActivity.h"
-#include "KOReaderSettingsActivity.h"
 #include "LanguageSelectActivity.h"
 #include "LibraryIndexRebuildActivity.h"
 #include "MappedInputManager.h"
@@ -87,7 +86,6 @@ void SettingsActivity::rebuildSettingsLists() {
                                                                               SettingAction::RemapReaderFrontButtons));
   }
   systemSettings.push_back(SettingInfo::Action(StrId::STR_WIFI_NETWORKS, SettingAction::Network));
-  systemSettings.push_back(SettingInfo::Action(StrId::STR_KOREADER_SYNC, SettingAction::KOReaderSync));
   systemSettings.push_back(SettingInfo::Action(StrId::STR_BOOKORBIT_SYNC, SettingAction::BookOrbitSync));
   systemSettings.push_back(SettingInfo::Action(StrId::STR_OPDS_SERVERS, SettingAction::OPDSBrowser));
   // The BookOrbit Home has no local-library entry; legacy SD files stay reachable here as a
@@ -410,9 +408,6 @@ void SettingsActivity::toggleCurrentSetting() {
         break;
       case SettingAction::CustomiseStatusBar:
         startActivityForResult(std::make_unique<StatusBarSettingsActivity>(renderer, mappedInput), resultHandler);
-        break;
-      case SettingAction::KOReaderSync:
-        startActivityForResult(std::make_unique<KOReaderSettingsActivity>(renderer, mappedInput), resultHandler);
         break;
       case SettingAction::BookOrbitSync:
         startActivityForResult(std::make_unique<BookOrbitSettingsActivity>(renderer, mappedInput), resultHandler);

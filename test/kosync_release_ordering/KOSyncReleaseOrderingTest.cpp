@@ -1,20 +1,4 @@
-// Locks in the call-ORDER invariants from the Ruby acceptance-inspection
-// follow-up to b1c2b4d ("fix: force-release SD font mini-bitmaps before
-// KOSync TLS"): two in-scope gaps where a release call existed but ran too
-// late (or not at all) relative to further EPUB allocation / the actual TLS
-// request that follows it.
-//
-// A full runtime test of these call sites would need to stub GfxRenderer,
-// ActivityManager, WiFi, and Epub -- disproportionate for what is fundamentally
-// a source-ordering property ("call A happens before call B in this
-// function"), and the kind of thing a future edit could silently reorder
-// without any of the existing unit tests noticing (FontCacheManager's own
-// release logic is already covered by test/sdcardfont_transient_release/;
-// this test is specifically about WHERE the calls sit, not whether the
-// release logic itself works). Reading the real source as text and asserting
-// relative substring positions is the smallest seam that actually catches a
-// regression here: if either ordering is undone, this test fails immediately
-// without needing to build or run any device code.
+// Source-order guards for the retained BookOrbit transport and removed product entry points.
 
 #include <gtest/gtest.h>
 
@@ -45,67 +29,31 @@ size_t mustFind(const std::string& haystack, const std::string& needle, const ch
 
 }  // namespace
 
-TEST(KOSyncReleaseOrdering, ManualSyncReleasesBeforeProgressMapping) {
-  // Gap 1 (Ruby): EpubReaderActivity::launchKOReaderSync() called
-  // ProgressMapper::toSavedProgress() -- which can do further EPUB
-  // parsing/inflate work -- before any force-release ran, since
-  // KOReaderSyncActivity's own release calls don't exist yet at that point
-  // (the sync activity hasn't even been constructed). The user's real device
-  // log showed ZIP inflate failures before NTP/TLS ever started, consistent
-  // with allocation pressure at exactly this point.
-  const std::string src = readFile(REPO_ROOT "/src/activities/reader/EpubReaderActivity.cpp");
-  ASSERT_FALSE(src.empty()) << "could not read EpubReaderActivity.cpp -- check REPO_ROOT";
-
-  const size_t fnPos = mustFind(src, "bool EpubReaderActivity::launchKOReaderSync() {", "launchKOReaderSync()");
-  const size_t releasePos =
-      mustFind(src, "if (auto* fcm = renderer.getFontCacheManager()) fcm->forceReleaseTransientCaches();",
-               "the force-release call");
-  const size_t mappingPos = mustFind(
-      src, "SavedProgressPosition localKoPos = ProgressMapper::toSavedProgress(epub, localPos);", "toSavedProgress()");
-
-  EXPECT_LT(fnPos, releasePos) << "the force-release call must be inside launchKOReaderSync()";
-  EXPECT_LT(releasePos, mappingPos) << "the force-release call must run BEFORE toSavedProgress(), "
-                                       "not after -- that ordering is the whole point of this fix";
+TEST(BookOrbitReleaseOrdering, AutomaticPushReleasesAfterEpubAndAgainBeforePut) {
+  const std::string src = readFile(REPO_ROOT "/src/util/BookOrbitAutoSync.cpp");
+  ASSERT_FALSE(src.empty());
+  const size_t reset = mustFind(src, "epub.reset();", "EPUB release");
+  const size_t connect = mustFind(src, "if (!connectToSavedWifi())", "WiFi connection");
+  const size_t release = src.find("forceReleaseTransientCaches()", reset);
+  EXPECT_LT(reset, release);
+  EXPECT_LT(release, connect);
+  const size_t put = mustFind(src, "session.updateProgressAndVerify(toPush, userRequestedAbort)", "progress PUT");
+  const size_t secondRelease = src.rfind("forceReleaseTransientCaches()", put);
+  EXPECT_LT(connect, secondRelease);
+  EXPECT_LT(secondRelease, put);
 }
 
-TEST(KOSyncReleaseOrdering, AutomaticPushReleasesAgainRightBeforeThePut) {
-  // Gap 2 (Ruby): KOReaderAutoSync::pushCurrentProgress() released before the
-  // EPUB reload, then kept the shared_ptr<Epub> alive through
-  // ProgressMapper::toSavedProgress() and straight into the PUT (originally
-  // the static KOReaderSyncClient::updateProgress(), now routed through the
-  // reused-transport Session::updateProgress()) -- so the earlier release did
-  // not actually cover the second TLS request, despite a comment implying it
-  // did. The fix: free the Epub and release again immediately before the
-  // PUT, once toPush no longer needs it.
-  const std::string src = readFile(REPO_ROOT "/src/util/KOReaderAutoSync.cpp");
-  ASSERT_FALSE(src.empty()) << "could not read KOReaderAutoSync.cpp -- check REPO_ROOT";
-
-  // The unified transaction accepts a null renderer for display-less wakes, so the release is
-  // guarded. Match that adjacent block and separately require the second guarded release before
-  // PUT; together they preserve the old heap invariant without dereferencing headless state.
-  const size_t resetThenReleasePos =
-      mustFind(src,
-               "epub.reset();\n"
-               "  if (renderer) {\n"
-               "    if (auto* fcm = renderer->getFontCacheManager()) fcm->forceReleaseTransientCaches();\n"
-               "  }",
-               "epub.reset() immediately followed by the force-release call");
-
-  const size_t putPos =
-      mustFind(src, "session.updateProgress(toPush, userRequestedAbort);", "the updateProgress() PUT call");
-  const size_t secondReleasePos = src.rfind("renderer->getFontCacheManager()", putPos);
-
-  EXPECT_LT(resetThenReleasePos, putPos)
-      << "epub.reset() + forceReleaseTransientCaches() must run before the PUT";
-  ASSERT_NE(secondReleasePos, std::string::npos);
-  EXPECT_LT(resetThenReleasePos, secondReleasePos);
-  EXPECT_LT(secondReleasePos, putPos) << "transient caches must be released again immediately before the PUT";
-
-  // Also confirm the comment no longer overclaims coverage of the PUT -- the
-  // exact wording from before this fix, which this test would otherwise not
-  // notice was left behind (it doesn't affect behavior, but leaving a false
-  // claim in a safety-relevant comment is exactly the kind of thing that
-  // misleads the next person touching this function).
-  EXPECT_EQ(src.find("and the second TLS request\n  // (updateProgress) that follows it"), std::string::npos)
-      << "a stale comment claiming the earlier release covers the PUT is still present";
+TEST(BookOrbitProduct, RetiredProviderHasNoUiOrNetworkEntryPoints) {
+  for (const char* path : {"/src/activities/reader/EpubReaderActivity.cpp", "/src/activities/ActivityManager.cpp",
+                           "/src/main.cpp"}) {
+    const std::string src = readFile(std::string(REPO_ROOT) + path);
+    ASSERT_FALSE(src.empty());
+    EXPECT_EQ(src.find("KOReaderAutoSync::sync"), std::string::npos) << path;
+    EXPECT_EQ(src.find("launchKOReaderSync"), std::string::npos) << path;
+  }
+  const auto web = readFile(REPO_ROOT "/src/network/CrossPointWebServer.cpp");
+  const auto page = readFile(REPO_ROOT "/src/network/html/SettingsPage.html");
+  EXPECT_EQ(web.find("\"/api/kosync"), std::string::npos);
+  EXPECT_EQ(page.find("/api/kosync"), std::string::npos);
+  EXPECT_EQ(page.find("renderKOSyncSection"), std::string::npos);
 }

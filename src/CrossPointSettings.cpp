@@ -123,6 +123,9 @@ void CrossPointSettings::toJson(JsonDocument& doc) const {
     }
   });
 
+  // Mapped settings entry (see SettingsList.h): the raw stored value, unchanged key.
+  doc["longPressMenuFunction"] = longPressMenuFunction;
+
   // Front button remap — managed by RemapFrontButtons sub-activity, not in SettingsList.
   doc["frontButtonBack"] = frontButtonBack;
   doc["frontButtonConfirm"] = frontButtonConfirm;
@@ -260,6 +263,8 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
     needsResave = true;
   }
   // Front button remap — managed by RemapFrontButtons sub-activity, not in SettingsList.
+  longPressMenuFunction =
+      clamp(doc["longPressMenuFunction"] | (uint8_t)LP_MENU_DISABLED, (uint8_t)(LP_MENU_DICTIONARY + 1), LP_MENU_DISABLED);
   frontButtonBack = clamp(doc["frontButtonBack"] | (uint8_t)FRONT_HW_BACK, FRONT_BUTTON_HARDWARE_COUNT, FRONT_HW_BACK);
   frontButtonConfirm =
       clamp(doc["frontButtonConfirm"] | (uint8_t)FRONT_HW_CONFIRM, FRONT_BUTTON_HARDWARE_COUNT, FRONT_HW_CONFIRM);

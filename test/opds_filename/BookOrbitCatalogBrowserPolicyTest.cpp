@@ -115,3 +115,39 @@ TEST(BookOrbitCatalogSessionCache, ReusesOnlyWithinTheConfiguredServerScope) {
 }
 
 }  // namespace
+
+TEST(BookOrbitCatalogBrowserPolicy, MapsEveryServerStatusAndUnknownFallback) {
+  using namespace BookOrbitCatalogBrowserPolicy;
+  EXPECT_EQ(readState("rereading"), ReadState::Reading);
+  EXPECT_EQ(readState("skimmed"), ReadState::Finished);
+  EXPECT_EQ(readState("on_hold"), ReadState::OnHold);
+  EXPECT_EQ(readState("abandoned"), ReadState::Abandoned);
+  EXPECT_EQ(readState("future_status"), ReadState::Other);
+  EXPECT_TRUE(matchesReadFilter("rereading", "reading"));
+  EXPECT_TRUE(matchesReadFilter("on_hold", "reading"));
+  EXPECT_TRUE(matchesReadFilter("skimmed", "finished"));
+  EXPECT_TRUE(matchesReadFilter("abandoned", "finished"));
+  EXPECT_FALSE(matchesReadFilter("read", "reading"));
+  EXPECT_TRUE(matchesReadFilter("want_to_read", "unread"));
+}
+
+TEST(BookOrbitCatalogBrowserPolicy, PagingMovesAtEdgesAndNeverWrapsTheLastPage) {
+  using namespace BookOrbitCatalogBrowserPolicy;
+  auto next = moveInList(0, 20, 21, true, 1);
+  EXPECT_TRUE(next.fetch);
+  EXPECT_EQ(next.page, 1);
+  EXPECT_EQ(next.index, 0);
+  auto previous = moveInList(1, 0, 21, true, -1);
+  EXPECT_TRUE(previous.fetch);
+  EXPECT_EQ(previous.page, 0);
+  EXPECT_EQ(previous.index, -1);
+  auto end = moveInList(2, 6, 7, false, 1);
+  EXPECT_FALSE(end.fetch);
+  EXPECT_EQ(end.index, 6);
+  auto begin = moveInList(0, 0, 21, true, -1);
+  EXPECT_FALSE(begin.fetch);
+  EXPECT_EQ(begin.index, 0);
+  auto screen = moveInList(0, 18, 21, true, 6);
+  EXPECT_TRUE(screen.fetch);
+  EXPECT_EQ(screen.page, 1);
+}

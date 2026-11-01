@@ -118,9 +118,6 @@ class CrossPointWebServer {
   void handleSettingsPage() const;
   void handleGetSettings() const;
   void handlePostSettings();
-  void handleGetKOSync() const;
-  void handlePostKOSync();
-  void handleClearKOSync();
   void handleGetBookOrbit() const;
   void handlePostBookOrbit();
   void handleClearBookOrbit();

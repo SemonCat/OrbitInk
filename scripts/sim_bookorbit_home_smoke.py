@@ -251,14 +251,14 @@ def main() -> int:
     make_sd(wa)
     state, flog = root / "state.json", root / "requests.jsonl"
     env = fixture_env(fx, state, flog)
-    acts, _ = script("ENTER", "DOWN", "ENTER", "ENTER", "ENTER", "wait2500", "ENTER", "wait4000")
+    acts, _ = script("ENTER", "DOWN", "DOWN", "ENTER", "DOWN", "DOWN", "ENTER", "ENTER", "wait2500", "ENTER", "wait4000")
     log_a = run.go("A", wa, env, acts, [
         (1300, "A1-home-empty.bmp", "Home, no book yet: hero invites the library"),
-        (2600, "A2-library-root.bmp", "Library root: 已下載 first, then server sections"),
-        (5200, "A3-books.bmp", "All books: two-line rows, progress"),
-        (6500, "A4-detail.bmp", "Book detail: 下載 is the primary action"),
-        (10400, "A5-downloaded.bmp", "After download: 開啟閱讀 focused"),
-        (14800, "A6-reader.bmp", "Reader on the downloaded copy"),
+        (2600, "A2-library-root.bmp", "Library root: search, local books, localized server sections"),
+        (6500, "A3-books.bmp", "All books: two-line rows, progress"),
+        (10500, "A4-detail.bmp", "Book detail: 下載 is the primary action"),
+        (14300, "A5-downloaded.bmp", "After download: 開啟閱讀 focused"),
+        (18700, "A6-reader.bmp", "Reader on the downloaded copy"),
     ])
     no_tofu("A", log_a)
     need(failures, "Applied X3 zh-TW BookOrbit Home profile" in log_a, "A: zh-TW profile did not apply the BookOrbit Home")
@@ -348,10 +348,10 @@ def main() -> int:
     state_f, log_f = root / "state-transient.json", root / "requests-transient.jsonl"
     set_faults(state_f, {"fail_once": "/plugin/catalog/books"})
     env_f = fixture_env(fx, state_f, log_f)
-    acts, _ = script("ENTER", "DOWN", "ENTER", "wait1000", "ENTER", "wait1500")
+    acts, _ = script("ENTER", "DOWN", "DOWN", "ENTER", "wait1000", "ENTER", "wait1500")
     log_f1 = run.go("F1", wf, env_f, acts, [
-        (4300, "F1-transient-error.bmp", "Uncached list after one transport failure: error + Retry"),
-        (6800, "F1-retried-list.bmp", "Same visit, after Retry: the list loaded from the server"),
+        (5700, "F1-transient-error.bmp", "Uncached list after one transport failure: error + Retry"),
+        (8100, "F1-retried-list.bmp", "Same visit, after Retry: the list loaded from the server"),
     ])
     no_tofu("F1", log_f1)
     books_calls = [r for r in requests(log_f) if r["path"].endswith("/plugin/catalog/books")]
@@ -397,10 +397,10 @@ def main() -> int:
     state_d = root / "state-fault.json"
     set_faults(state_d, {"download_status": 500})
     env_d = fixture_env(fx, state_d, root / "requests-fault.jsonl")
-    acts, _ = script("ENTER", "DOWN", "ENTER", "ENTER", "ENTER", "wait2500", "wait1500")
+    acts, _ = script("ENTER", "DOWN", "DOWN", "ENTER", "DOWN", "ENTER", "ENTER", "wait2500", "wait1500")
     run.expected_errs = ("unexpected status: 500", "Download failed: Server error")  # the injected fault
     log_d = run.go("D", wd, env_d, acts, [
-        (10400, "D1-download-failed.bmp", "Detail after a failed download: 下載失敗 · 重試"),
+        (13000, "D1-download-failed.bmp", "Detail after a failed download: 下載失敗 · 重試"),
     ])
     run.expected_errs = ()
     no_tofu("D", log_d)

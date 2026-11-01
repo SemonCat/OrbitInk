@@ -56,7 +56,7 @@ with the server title):
 Known server ids are localized (B5). Offline: 本機書籍 + cached rows, sub-header 「離線 · 儲存於 …」.
 
 Book list (server): row 0 is an explicit control row 「排序：書名 · 狀態：全部」 (only where sort/filter
-apply); rows are title (one line, truncated) over `author · 系列名 #n`, right column = status:
+apply); rows are title (one line, truncated) over `author · 系列名 #n`, second-line right column = status:
 `45%` (reading/progress), 「已讀完」, 「暫停」, 「想讀」, 「放棄」, nothing for unread; downloaded books get a
 「本機 · 」 prefix on line 2. No pager rows (B6): moving past the last row of a loaded 20-book server
 page loads the next page and selects its first row; before the first row of page > 0 loads the
@@ -96,11 +96,14 @@ existing cover cache is keyed to local EPUBs. Not efficient or memory-bounded at
 ## 5. Client/protocol fixes (bounded memory)
 
 - Streaming key-dropper on response bodies: drops the *values* of named keys (any depth) while
-  bytes stream in, keeping the existing byte caps on what is retained. Detail drops
+  bytes stream in, bounding each retained item and the response envelope. Detail drops
   description/relatedSections/collections/genres/tags (B1); facet pages drop booksHref/href/icon;
   book pages drop thumbnailUrl/detailUrl/formats. Host-tested state machine (strings, escapes,
   nesting, chunk boundaries).
-- Facet pages keep up to 60 entries (server page size), `hasNext` from server (B3).
+- Book/facet pages stream and parse one complete item at a time, then discard its JSON bytes.
+  A page can exceed 16 KB in total without losing entries: only one item plus envelope is retained
+  (16 KB cap). Facets keep up to 60 entries (server page size), `hasNext` from server (B3). An
+  oversized individual item rejects the request; partial fixed-offset pages are never committed.
 - Series facet → numeric `seriesId` (B2); list items parse seriesName/seriesIndex; book page keeps
   `total`.
 - No new endpoints; no catalog-wide fetch; only one server page (≤20 books / ≤60 facets) in RAM.
@@ -132,8 +135,8 @@ provider only, periodic interval unchanged, receipts unchanged; timer gate no lo
 
 Host tests (native CMake, `test/`): new catalog-client tests (key-dropper incl. chunk splits;
 detail with 6 KB description; 60-entry facet page; series numeric id; total/series fields); browser
-policy tests (auto-paging index math, breadcrumb truncation, status label mapping, options state
-survival); schedule/retry tests updated for BookOrbit-only providers (KOSync creds never enable);
+policy tests (auto-paging index math and complete status/filter mapping); simulator request
+assertions cover options and query survival; schedule/retry tests updated for BookOrbit-only providers (KOSync creds never enable);
 existing bookorbit_* / progress_* / stats / bookmark suites unchanged and passing; KOSync-only
 product tests removed with their code, protocol tests kept.
 Simulator: new `scripts/sim_bookorbit_library_smoke.py` (fixture-only; before/after screens;
@@ -146,3 +149,31 @@ review now, final P2 review of the whole branch (fable-5 → opus-5-5 → Codex)
 No CJK text entry on device (keyboard is QWERTY-EN) — search is for Latin titles/authors/ISBN;
 Chinese titles are found by browse/sort/filter. No covers (§4). No push/tag/flash. Real-server
 behaviour is modelled by fixtures, not live-verified.
+
+
+## Implementation and accepted design findings (2026-11-01)
+
+All five design-r1b P2 findings are implemented. Status mapping includes rereading, skimmed,
+unknown values and every settable choice. Successful detail edits refresh the current server page
+with the query and clamped selection retained; if a refresh fails, known nonmatching rows are
+removed from the active status filter. Paging commits only successful results and shows failure
+inline over the loaded page. Facet counts have an explicit presence bit, so an omitted count is
+not rendered as zero. The proposed partial-page salvage was superseded by per-item streaming:
+all 60 long CJK facet entries survive even when the response exceeds 16 KB, with no skipped offsets.
+
+The Journal theme keeps its crop brackets and hairlines. Book row titles use the full width;
+author/series/local marker and status share the measured second line. This accommodates the
+14-point SD CJK font without a fixed Latin subtitle offset. Options and detail actions use the
+existing theme list. Breadcrumbs keep their tail; position is a separate line above the list.
+The offline cache writes version 2 (total and series fields) and still reads version 1.
+
+KOSync-only activities, reader shortcuts, web settings/routes and automatic provider entry points
+are removed. Legacy deferred provider-1 records remain on SD but are ignored at every reader
+handoff. Shared protocol types, identity/XPath mapping, transport, last-sync notice, and the
+read-only credential migration remain available for BookOrbit. No local book, progress, stats or
+bookmark data is deleted. Timer smoke S1-S8 is retained; S9 proves legacy credentials alone issue
+no requests or timer, and S10 proves a corrupt retired store cannot stop BookOrbit timer wakes.
+
+The implementation remains text-only and button-driven. Search uses the existing QWERTY input;
+the scoped search action preserves current server filters and sort. Publication and final visual
+acceptance belong to the parent; this branch is a reviewable candidate, never a pushed release.

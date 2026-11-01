@@ -23,6 +23,7 @@
 #include "activities/network/WifiSelectionActivity.h"
 #include "activities/util/KeyboardEntryActivity.h"
 #include "components/UITheme.h"
+#include "components/themes/journal/JournalTheme.h"
 #include "fontIds.h"
 #include "util/BookCacheUtils.h"
 #include "util/BookOrbitCatalogBrowserPolicy.h"
@@ -71,6 +72,76 @@ bool wifiConnected() { return WiFi.status() == WL_CONNECTED && WiFi.localIP() !=
 // Transport-level failure: the request never got an HTTP answer. Only these fall back to the
 // offline cache; HTTP/auth errors are reported as such, never masked by stale data.
 bool isTransportFailure(const BOClient::Error error) { return error == BOClient::NETWORK_ERROR; }
+const char* sectionLabel(const std::string& id) {
+  if (id == ROOT_SEARCH) return tr(STR_BO_FIND);
+  if (id == ROOT_DOWNLOADED) return tr(STR_BO_LOCAL);
+  if (id == "continue-reading") return tr(STR_BO_CONTINUE);
+  if (id == "all-books") return tr(STR_BO_ALL_BOOKS);
+  if (id == "recent") return tr(STR_BO_RECENT);
+  if (id == "authors") return tr(STR_BO_AUTHORS);
+  if (id == "series") return tr(STR_BO_SERIES);
+  if (id == "libraries") return tr(STR_BO_LIBRARIES);
+  if (id == "collections") return tr(STR_BO_COLLECTIONS);
+  if (id == "smart-scopes") return tr(STR_BO_SMART);
+  return nullptr;
+}
+constexpr const char* SORTS[] = {"title", "author", "series", "recently_added", "recently_read", "recently_updated"};
+constexpr const char* FILTERS[] = {"", "unread", "reading", "finished"};
+const char* sortLabel(int i) {
+  const StrId ids[] = {StrId::STR_BO_TITLE, StrId::STR_BO_AUTHOR, StrId::STR_BO_SERIES, StrId::STR_BO_RECENT, StrId::STR_BO_RECENT_READ,
+                       StrId::STR_BO_RECENT_UPDATE};
+  return I18N.get(ids[i]);
+}
+const char* filterLabel(int i) {
+  const StrId ids[] = {StrId::STR_BO_ALL_STATES, StrId::STR_BO_UNREAD, StrId::STR_BO_READING, StrId::STR_BO_FINISHED};
+  return I18N.get(ids[i]);
+}
+std::string sortFilterLabel(const BOClient::BookQuery& query) {
+  int sort = 0, filter = 0;
+  for (int i = 0; i < 6; ++i) if (query.sort == SORTS[i]) sort = i;
+  for (int i = 0; i < 4; ++i) if (query.readStatus == FILTERS[i]) filter = i;
+  return std::string(tr(STR_BO_SORT)) + ": " + sortLabel(sort) + " / " + filterLabel(filter);
+}
+const char* statusLabel(const std::string& status) {
+  using State = BookOrbitCatalogBrowserPolicy::ReadState;
+  switch (BookOrbitCatalogBrowserPolicy::readState(status)) {
+    case State::Unread: return tr(STR_BO_UNREAD);
+    case State::WantToRead: return tr(STR_BO_WANT);
+    case State::Reading: return tr(STR_BO_READING);
+    case State::OnHold: return tr(STR_BO_HOLD);
+    case State::Finished: return tr(STR_BO_FINISHED);
+    case State::Abandoned: return tr(STR_BO_ABANDONED);
+    case State::Other: return tr(STR_BO_OTHER_STATE);
+  }
+  return tr(STR_BO_OTHER_STATE);
+}
+std::string statusValue(const std::string& status, float progress) {
+  const auto value = BookOrbitCatalogBrowserPolicy::readState(status);
+  using State = BookOrbitCatalogBrowserPolicy::ReadState;
+  if ((value == State::Reading || value == State::Other || status.empty()) && progress >= 0) {
+    return std::to_string(static_cast<int>(progress + 0.5f)) + "%";
+  }
+  return value == State::Unread ? "" : statusLabel(status);
+}
+std::string seriesText(const std::string& name, const std::string& index) {
+  return name + (name.empty() || index.empty() ? "" : " #" + index);
+}
+const char* localizedError(BOClient::Error error) {
+  switch (error) {
+    case BOClient::NO_CREDENTIALS:
+    case BOClient::AUTH_FAILED: return tr(STR_BO_AUTH_ERROR);
+    case BOClient::NETWORK_ERROR: return tr(STR_BO_CONNECT_ERROR);
+    case BOClient::SERVER_ERROR: return tr(STR_BO_SERVER_ERROR);
+    case BOClient::BAD_REQUEST: return tr(STR_BO_REJECT_ERROR);
+    case BOClient::JSON_ERROR: return tr(STR_BO_DATA_ERROR);
+    case BOClient::LOW_MEMORY: return tr(STR_BO_MEMORY_ERROR);
+    case BOClient::UNSUPPORTED: return tr(STR_BO_UNSUPPORTED_ERROR);
+    case BOClient::FILE_ERROR: return tr(STR_BO_FILE_ERROR);
+    case BOClient::ABORTED: return tr(STR_BO_CANCEL_ERROR);
+    case BOClient::OK: return "";
+  }
+  return tr(STR_BO_SERVER_ERROR);
+}
 }  // namespace
 
 void BookOrbitCatalogBrowserActivity::onEnter() {
@@ -90,6 +161,10 @@ void BookOrbitCatalogBrowserActivity::onEnter() {
   currentPage = 0;
   currentPageHasNext = false;
   selectorIndex = 0;
+  totalBooks = 0;
+  location = tr(STR_BO_LIBRARY);
+  listNotice.clear();
+  paging = detailChanged = false;
   consumeConfirm = false;
   consumeBack = false;
   backReleasePending = true;
@@ -161,29 +236,56 @@ size_t BookOrbitCatalogBrowserActivity::itemCount() const {
 }
 
 size_t BookOrbitCatalogBrowserActivity::displayCount() const {
-  const bool pageable = listKind != ListKind::ROOT;
-  return itemCount() + (pageable && currentPage > 0 ? 1 : 0) + (pageable && currentPageHasNext ? 1 : 0);
-}
-
-bool BookOrbitCatalogBrowserActivity::isPrevPageRow(const size_t displayIndex) const {
-  return listKind != ListKind::ROOT && currentPage > 0 && displayIndex == 0;
-}
-
-bool BookOrbitCatalogBrowserActivity::isNextPageRow(const size_t displayIndex) const {
-  return listKind != ListKind::ROOT && currentPageHasNext && displayIndex == displayCount() - 1;
+  return itemCount() + (listKind == ListKind::BOOKS ? 1 : 0);
 }
 
 size_t BookOrbitCatalogBrowserActivity::toItemIndex(const size_t displayIndex) const {
-  const bool hasPrevRow = listKind != ListKind::ROOT && currentPage > 0;
-  return hasPrevRow ? displayIndex - 1 : displayIndex;
+  return listKind == ListKind::BOOKS ? displayIndex - 1 : displayIndex;
+}
+
+int BookOrbitCatalogBrowserActivity::listTop() const {
+  const auto& m = UITheme::getInstance().getMetrics();
+  return m.topPadding + m.headerHeight + m.verticalSpacing + renderer.getLineHeight(SMALL_FONT_ID) * 2 + 12;
+}
+
+int BookOrbitCatalogBrowserActivity::rowHeight() const {
+  const bool twoLine = listKind == ListKind::BOOKS || listKind == ListKind::DOWNLOADED;
+  const auto& m = UITheme::getInstance().getMetrics();
+  return std::max(twoLine ? m.listWithSubtitleRowHeight : m.listRowHeight,
+                  renderer.getLineHeight(UI_10_FONT_ID) + (twoLine ? renderer.getLineHeight(SMALL_FONT_ID) : 0) + 14);
 }
 
 int BookOrbitCatalogBrowserActivity::listPageItems() const {
-  const auto& metrics = UITheme::getInstance().getMetrics();
-  const int top = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
-  const int height = renderer.getScreenHeight() - top - metrics.buttonHintsHeight - metrics.verticalSpacing;
-  return GUI.getListPageItems(height, /*hasSubtitle=*/true);
+  const auto& m = UITheme::getInstance().getMetrics();
+  return std::max(1, (renderer.getScreenHeight() - listTop() - m.buttonHintsHeight - m.verticalSpacing) / rowHeight());
 }
+
+void BookOrbitCatalogBrowserActivity::moveSelection(int delta) {
+  const auto move = BookOrbitCatalogBrowserPolicy::moveInList(currentPage, selectorIndex,
+      static_cast<int>(displayCount()), currentPageHasNext, delta);
+  if (!move.fetch || listKind == ListKind::ROOT) {
+    selectorIndex = move.index;
+    requestUpdate();
+    return;
+  }
+  paging = true;
+  listNotice.clear();
+  state = BrowserState::LOADING;
+  statusMessage = tr(STR_LOADING);
+  requestUpdate(true);
+  switch (listKind) {
+    case ListKind::BOOKS: loadBooks(move.page); break;
+    case ListKind::FACETS: loadFacets(move.page); break;
+    case ListKind::DOWNLOADED: loadDownloaded(move.page); break;
+    case ListKind::ROOT: break;
+  }
+  paging = false;
+  if (state == BrowserState::BROWSING && currentPage == move.page) {
+    selectorIndex = move.index < 0 ? std::max(0, static_cast<int>(displayCount()) - 1) : move.index;
+  }
+  requestUpdate();
+}
+
 void BookOrbitCatalogBrowserActivity::loop() {
   if (state == BrowserState::WIFI_SELECTION || state == BrowserState::SEARCH_INPUT) return;
   if (InputReleaseGuard::consumeInitialRelease(mappedInput, MappedInputManager::Button::Back, backReleasePending)) {
@@ -199,8 +301,27 @@ void BookOrbitCatalogBrowserActivity::loop() {
     return;
   }
 
+  if (state == BrowserState::OPTIONS || state == BrowserState::READ_STATUS || state == BrowserState::RATING) {
+    const int count = state == BrowserState::OPTIONS ? 11 : state == BrowserState::READ_STATUS ? 6 : 6;
+    if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+      state = state == BrowserState::OPTIONS ? BrowserState::BROWSING : BrowserState::DETAIL;
+      requestUpdate();
+    } else if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+      applyChoice();
+    } else {
+      buttonNavigator.onNextRelease([this, count] { choiceIndex = std::min(choiceIndex + 1, count - 1); requestUpdate(); });
+      buttonNavigator.onPreviousRelease([this] { choiceIndex = std::max(0, choiceIndex - 1); requestUpdate(); });
+    }
+    return;
+  }
+
   if (state == BrowserState::ERROR) {
     if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+      if (retryDetail && wifiConnected()) {
+        const auto book = retryBook;
+        openBookDetail(book);
+        return;
+      }
       if (wifiConnected()) {
         // An explicit Retry with the link up always tries the server again: a transport failure
         // earlier in the session must not pin the library offline (final review r1, finding 1).
@@ -226,7 +347,13 @@ void BookOrbitCatalogBrowserActivity::loop() {
         launchWifiSelection();
       }
     } else if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
-      navigateBack();
+      if (retryDetail) {
+        retryDetail = false;
+        state = BrowserState::BROWSING;
+        requestUpdate();
+      } else {
+        navigateBack();
+      }
     }
     return;
   }
@@ -252,19 +379,25 @@ void BookOrbitCatalogBrowserActivity::loop() {
             downloadFile(row.fileIndex);
             return;
           case DetailRowKind::READ_STATUS:
-            cycleReadStatus();
+            choiceIndex = 0;
+            for (int i = 0; i < 6; ++i) {
+              if (BookOrbitCatalogBrowserPolicy::readState(detail.readStatus) ==
+                  BookOrbitCatalogBrowserPolicy::readState(BOClient::SETTABLE_READ_STATUSES[i])) choiceIndex = i;
+            }
+            state = BrowserState::READ_STATUS;
+            requestUpdate();
             return;
           case DetailRowKind::RATING:
-            cycleRating();
+            choiceIndex = std::max(0, detail.rating);
+            state = BrowserState::RATING;
+            requestUpdate();
             return;
           case DetailRowKind::OFFLINE_UNAVAILABLE:
             return;
         }
       }
     } else if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
-      state = BrowserState::BROWSING;
-      detailError.clear();
-      requestUpdate();
+      returnFromDetail();
     } else {
       const int rowCount = static_cast<int>(detailRows.size());
       if (rowCount > 0) {
@@ -290,67 +423,23 @@ void BookOrbitCatalogBrowserActivity::loop() {
       navigateBack();
       return;
     }
-    if (mappedInput.wasReleased(MappedInputManager::Button::Left) && !offline) {
-      // Search from the top of any unfiltered book listing, matching OPDS's "Left at row 0".
-      if (listKind == ListKind::BOOKS && facetKind == FacetKind::NONE && selectorIndex == 0) {
-        launchSearch();
-        return;
-      }
-    }
-
-    const size_t count = displayCount();
-    if (count > 0) {
-      const int pageItems = listPageItems();
-      buttonNavigator.onNextRelease([this, count] {
-        selectorIndex = ButtonNavigator::nextIndex(selectorIndex, static_cast<int>(count));
-        requestUpdate();
-      });
-      buttonNavigator.onPreviousRelease([this, count] {
-        selectorIndex = ButtonNavigator::previousIndex(selectorIndex, static_cast<int>(count));
-        requestUpdate();
-      });
-      buttonNavigator.onNextContinuous([this, count, pageItems] {
-        selectorIndex = ButtonNavigator::nextPageIndex(selectorIndex, static_cast<int>(count), pageItems);
-        requestUpdate();
-      });
-      buttonNavigator.onPreviousContinuous([this, count, pageItems] {
-        selectorIndex = ButtonNavigator::previousPageIndex(selectorIndex, static_cast<int>(count), pageItems);
-        requestUpdate();
-      });
+    if (displayCount() > 0) {
+      buttonNavigator.onNextRelease([this] { moveSelection(1); });
+      buttonNavigator.onPreviousRelease([this] { moveSelection(-1); });
+      buttonNavigator.onNextContinuous([this] { moveSelection(listPageItems()); });
+      buttonNavigator.onPreviousContinuous([this] { moveSelection(-listPageItems()); });
     }
   }
 }
+
 namespace {
 std::string facetRowTitle(const BOClient::FacetEntry& facet) {
-  return facet.title + " (" + std::to_string(facet.bookCount) + ")";
+  return facet.title;
 }
-// "-" is a neutral placeholder, not UI copy, so it needs no tr() entry.
-std::string readStatusDisplayText(const std::string& status) {
-  if (status.empty()) return "-";
-  std::string out = status;
-  bool capitalizeNext = true;
-  for (auto& c : out) {
-    if (c == '_') {
-      c = ' ';
-      capitalizeNext = true;
-      continue;
-    }
-    if (capitalizeNext) {
-      c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
-      capitalizeNext = false;
-    }
-  }
-  return out;
+std::string ratingDisplayText(int rating) {
+  return rating < 0 ? tr(STR_BO_NO_RATING) : std::to_string(rating) + "/5";
 }
-std::string ratingDisplayText(const int rating) {
-  return (rating < 0 ? std::string("-") : std::to_string(rating)) + "/5";
-}
-std::string percentText(const float pct) {
-  if (pct < 0.0f) return {};
-  char buf[8];
-  snprintf(buf, sizeof(buf), "%d%%", static_cast<int>(pct + 0.5f));
-  return buf;
-}
+
 }  // namespace
 
 void BookOrbitCatalogBrowserActivity::render(RenderLock&&) {
@@ -358,113 +447,160 @@ void BookOrbitCatalogBrowserActivity::render(RenderLock&&) {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int pageWidth = renderer.getScreenWidth();
   const int pageHeight = renderer.getScreenHeight();
-
-  const char* title = entryMode == EntryMode::Settings ? tr(STR_BOOKORBIT_CATALOG) : tr(STR_BO_LIBRARY);
-  std::string subtitle;
-  if (!offlineSavedDate.empty()) {
-    char buf[64];
-    snprintf(buf, sizeof(buf), tr(STR_BO_OFFLINE_SAVED), offlineSavedDate.c_str());
-    subtitle = buf;
-  } else if (offline) {
-    subtitle = tr(STR_BO_OFFLINE);
+  const bool choices = state == BrowserState::OPTIONS || state == BrowserState::READ_STATUS || state == BrowserState::RATING;
+  const char* title = state == BrowserState::OPTIONS ? tr(STR_BO_OPTIONS) :
+                      state == BrowserState::READ_STATUS ? tr(STR_BOOKORBIT_READ_STATUS) :
+                      state == BrowserState::RATING ? tr(STR_BOOKORBIT_RATING) : tr(STR_BO_LIBRARY);
+  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, title);
+  const int x = metrics.contentSidePadding;
+  const int width = pageWidth - 2 * x;
+  int contextY = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  std::string path = location;
+  // Remove complete leading UTF-8 characters until the tail fits, preserving the current level.
+  while (!path.empty() && renderer.getTextWidth(SMALL_FONT_ID, path.c_str()) > width) {
+    size_t n = 1;
+    while (n < path.size() && (static_cast<unsigned char>(path[n]) & 0xc0) == 0x80) ++n;
+    path.erase(0, n);
   }
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, title,
-                 subtitle.empty() ? nullptr : subtitle.c_str());
-  const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
-  const int contentHeight = pageHeight - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing;
-
-  if (state == BrowserState::CHECK_WIFI || state == BrowserState::LOADING) {
-    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, statusMessage.c_str());
-    const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
-    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
-    renderer.displayBuffer();
-    return;
-  }
-
-  if (state == BrowserState::ERROR) {
-    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 20, tr(STR_ERROR_MSG));
-    UITheme::drawCenteredWrappedText(renderer, Rect{20, pageHeight / 2, pageWidth - 40, 80}, UI_10_FONT_ID,
-                                     errorMessage.c_str(), 2, true, EpdFontFamily::REGULAR,
-                                     UITheme::TextVerticalAlignment::TOP);
-    const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_RETRY), "", "");
-    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
-    renderer.displayBuffer();
-    return;
-  }
-
-  if (state == BrowserState::DOWNLOADING) {
-    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 40, tr(STR_BO_DOWNLOADING));
-    const auto bookTitle = renderer.truncatedText(UI_10_FONT_ID, statusMessage.c_str(), pageWidth - 40);
-    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 10, bookTitle.c_str());
-    if (downloadTotal > 0) {
-      GUI.drawProgressBar(renderer, Rect{50, pageHeight / 2 + 20, pageWidth - 100, 20}, downloadProgress,
-                          downloadTotal);
+  renderer.drawText(SMALL_FONT_ID, x, contextY, path.c_str());
+  contextY += renderer.getLineHeight(SMALL_FONT_ID);
+  std::string position;
+  if (offline) {
+    position = tr(STR_BO_OFFLINE);
+    if (!offlineSavedDate.empty()) {
+      char buf[80];
+      snprintf(buf, sizeof(buf), tr(STR_BO_OFFLINE_SAVED), offlineSavedDate.c_str());
+      position = buf;
     }
-    const auto labels = mappedInput.mapLabels(tr(STR_CANCEL), "", "", "");
+  } else if (!listNotice.empty()) {
+    position = listNotice;
+  } else if (state == BrowserState::BROWSING && listKind != ListKind::ROOT) {
+    const int first = (selectorIndex / listPageItems()) * listPageItems();
+    const int offset = listKind == ListKind::BOOKS ? 1 : 0;
+    const int pageSize = listKind == ListKind::BOOKS ? BOClient::PAGE_SIZE :
+                         listKind == ListKind::FACETS ? BOClient::MAX_FACET_PAGE_ITEMS : listPageItems();
+    const int start = currentPage * pageSize + std::max(first - offset, 0) + 1;
+    const int end = currentPage * pageSize + std::max(0, std::min(first + listPageItems(), static_cast<int>(displayCount())) - offset);
+    position = itemCount() == 0 ? "0" : std::to_string(start) + "-" + std::to_string(end);
+    if (totalBooks && listKind == ListKind::BOOKS) position += " / " + std::to_string(totalBooks);
+    else position += "  < " + std::to_string(currentPage + 1) + (currentPageHasNext ? " >" : "");
+  } else if (listKind == ListKind::ROOT) {
+    position = "BookOrbit";
+  }
+  auto info = renderer.truncatedText(SMALL_FONT_ID, position.c_str(), width);
+  renderer.drawText(SMALL_FONT_ID, x, contextY, info.c_str());
+  renderer.drawLine(x, listTop() - 7, pageWidth - x, listTop() - 7);
+
+  if (state == BrowserState::CHECK_WIFI || state == BrowserState::LOADING || state == BrowserState::ERROR ||
+      state == BrowserState::DOWNLOADING) {
+    const char* message = state == BrowserState::ERROR ? errorMessage.c_str() :
+                          state == BrowserState::DOWNLOADING ? tr(STR_BO_DOWNLOADING) : statusMessage.c_str();
+    UITheme::drawCenteredWrappedText(renderer, Rect{x, pageHeight / 2 - 40, width, 120}, UI_10_FONT_ID, message,
+                                     3, true, EpdFontFamily::REGULAR, UITheme::TextVerticalAlignment::TOP);
+    if (state == BrowserState::DOWNLOADING && downloadTotal > 0) {
+      GUI.drawProgressBar(renderer, Rect{50, pageHeight / 2 + 100, pageWidth - 100, 20}, downloadProgress, downloadTotal);
+    }
+    const auto labels = mappedInput.mapLabels(tr(STR_BACK), state == BrowserState::ERROR ? tr(STR_RETRY) : "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
     renderer.displayBuffer();
     return;
   }
+  if (state == BrowserState::DETAIL) { renderDetail(pageWidth, pageHeight); return; }
 
-  if (state == BrowserState::DETAIL) {
-    renderDetail(pageWidth, pageHeight);
-    return;
+  if (choices) {
+    const int count = state == BrowserState::OPTIONS ? 11 : 6;
+    const auto label = [this](int i) -> std::string {
+      if (state == BrowserState::OPTIONS) {
+        if (i < 6) return std::string(tr(STR_BO_SORT)) + ": " + sortLabel(i);
+        if (i < 10) return std::string(tr(STR_BO_FILTER)) + ": " + filterLabel(i - 6);
+        return tr(STR_BO_SEARCH_LIST);
+      }
+      if (state == BrowserState::READ_STATUS) return statusLabel(BOClient::SETTABLE_READ_STATUSES[i]);
+      return i == 0 ? tr(STR_BO_NO_RATING) : std::to_string(i) + "/5";
+    };
+    const auto value = [this](int i) -> std::string {
+      bool current = false;
+      if (state == BrowserState::OPTIONS) {
+        current = i < 6 ? (currentQuery.sort.empty() ? i == 0 : currentQuery.sort == SORTS[i]) :
+                  i < 10 && currentQuery.readStatus == FILTERS[i - 6];
+      } else if (state == BrowserState::READ_STATUS) {
+        current = BookOrbitCatalogBrowserPolicy::readState(detail.readStatus) ==
+                  BookOrbitCatalogBrowserPolicy::readState(BOClient::SETTABLE_READ_STATUSES[i]);
+      } else current = i == std::max(0, detail.rating);
+      return current ? tr(STR_BO_CURRENT) : "";
+    };
+    GUI.drawList(renderer, Rect{0, listTop(), pageWidth, pageHeight - listTop() - metrics.buttonHintsHeight - 10},
+                 count, choiceIndex, label, nullptr, nullptr, value);
+  } else {
+    const int count = static_cast<int>(displayCount());
+    if (itemCount() == 0) {
+      const char* empty = listKind == ListKind::DOWNLOADED ? tr(STR_BO_NO_DOWNLOADS) :
+                          (!currentQuery.searchText.empty() || !currentQuery.readStatus.empty()) ? tr(STR_BO_NO_MATCH) :
+                          tr(STR_BO_EMPTY_LIST);
+      renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 30, empty);
+      if (!currentQuery.searchText.empty() || !currentQuery.readStatus.empty()) {
+        const auto hint = renderer.truncatedText(SMALL_FONT_ID, tr(STR_BO_CHANGE_FILTER), width);
+        renderer.drawCenteredText(SMALL_FONT_ID, pageHeight / 2 + 75, hint.c_str());
+      }
+    }
+    const bool twoLine = listKind == ListKind::BOOKS || listKind == ListKind::DOWNLOADED;
+    const int height = rowHeight();
+    const int first = selectorIndex / listPageItems() * listPageItems();
+    for (int i = first; i < count && i < first + listPageItems(); ++i) {
+      const int y = listTop() + (i - first) * height;
+      const bool selected = i == selectorIndex;
+      const bool journal = SETTINGS.uiTheme == CrossPointSettings::JOURNAL;
+      if (selected) {
+        if (journal) JournalTheme::drawCropBrackets(renderer, Rect{x - 4, y, width + 8, height - 4}, 0, 10, 2);
+        else renderer.fillRect(0, y - 2, pageWidth, height);
+      }
+      const bool black = journal || !selected;
+      std::string label, sub, value;
+      if (listKind == ListKind::BOOKS && i == 0) {
+        label = sortFilterLabel(currentQuery);
+        sub = currentQuery.searchText.empty() ? tr(STR_BO_SEARCH_LIST) :
+              std::string(tr(STR_SEARCH)) + ": " + currentQuery.searchText;
+      } else {
+        const size_t item = toItemIndex(i);
+        if (listKind == ListKind::ROOT) {
+          label = sections[item].title;
+          if (sections[item].id == ROOT_DOWNLOADED) {
+            char buf[32]; snprintf(buf, sizeof(buf), tr(STR_BO_BOOK_COUNT), localBookCount); value = buf;
+          }
+        }
+        else if (listKind == ListKind::FACETS) {
+          label = facetRowTitle(facets[item]);
+          if (facets[item].hasBookCount) {
+            char buf[32]; snprintf(buf, sizeof(buf), tr(STR_BO_BOOK_COUNT), facets[item].bookCount); value = buf;
+          }
+        } else if (listKind == ListKind::DOWNLOADED) {
+          label = downloaded[item].title; sub = downloaded[item].authors; value = tr(STR_BO_LOCAL_PREFIX);
+        } else {
+          const auto& book = books[item];
+          label = book.title;
+          sub = item < booksDownloaded.size() && booksDownloaded[item] ? std::string(tr(STR_BO_LOCAL_PREFIX)) + " / " : "";
+          sub += book.authors;
+          if (!book.seriesName.empty()) sub += " / " + seriesText(book.seriesName, book.seriesIndex);
+          value = statusValue(book.readStatus, book.progressPercent);
+        }
+      }
+      // Status occupies the second line so long titles retain the full screen width.
+      const int valueWidth = value.empty() ? 0 : renderer.getTextWidth(twoLine ? SMALL_FONT_ID : UI_10_FONT_ID, value.c_str()) + 12;
+      const auto text = renderer.truncatedText(UI_10_FONT_ID, label.c_str(), width - (twoLine ? 0 : valueWidth));
+      renderer.drawText(UI_10_FONT_ID, x, y, text.c_str(), black);
+      if (twoLine) {
+        const auto textSub = renderer.truncatedText(SMALL_FONT_ID, sub.c_str(), std::max(0, width - valueWidth));
+        renderer.drawText(SMALL_FONT_ID, x, y + renderer.getLineHeight(UI_10_FONT_ID) + 2, textSub.c_str(), black);
+      }
+      if (!value.empty()) renderer.drawText(twoLine ? SMALL_FONT_ID : UI_10_FONT_ID, pageWidth - x - valueWidth + 12,
+          y + (twoLine ? renderer.getLineHeight(UI_10_FONT_ID) + 2 : 0), value.c_str(), black);
+      if (journal && i + 1 < count && i + 1 < first + listPageItems())
+        renderer.drawLine(x, y + height - 1, pageWidth - x, y + height - 1);
+    }
   }
-
-  const size_t count = displayCount();
-  const bool searchable = !offline && listKind == ListKind::BOOKS && facetKind == FacetKind::NONE;
-  const char* leftLabel = (searchable && selectorIndex == 0) ? tr(STR_SEARCH) : tr(STR_DIR_UP);
-  const auto labels = mappedInput.mapLabels(tr(STR_BACK), count > 0 ? tr(STR_OPEN) : "", leftLabel, tr(STR_DIR_DOWN));
+  const auto labels = mappedInput.mapLabels(tr(STR_BACK), displayCount() > 0 || choices ? tr(STR_OPEN) : "",
+                                           tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
-
-  if (count == 0) {
-    const char* empty = listKind == ListKind::DOWNLOADED ? tr(STR_BO_NO_DOWNLOADS) : tr(STR_NO_ENTRIES);
-    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, empty);
-    renderer.displayBuffer();
-    return;
-  }
-
-  const auto rowTitle = [this](const int i) -> std::string {
-    if (isPrevPageRow(static_cast<size_t>(i))) return tr(STR_PREV_PAGE);
-    if (isNextPageRow(static_cast<size_t>(i))) return tr(STR_NEXT_PAGE);
-    const size_t item = toItemIndex(static_cast<size_t>(i));
-    switch (listKind) {
-      case ListKind::ROOT:
-        return sections[item].title;
-      case ListKind::BOOKS:
-        return books[item].title;
-      case ListKind::FACETS:
-        return facetRowTitle(facets[item]);
-      case ListKind::DOWNLOADED:
-        return downloaded[item].title;
-    }
-    return {};
-  };
-  const auto rowSubtitle = [this](const int i) -> std::string {
-    if (isPrevPageRow(static_cast<size_t>(i)) || isNextPageRow(static_cast<size_t>(i))) return {};
-    const size_t item = toItemIndex(static_cast<size_t>(i));
-    switch (listKind) {
-      case ListKind::BOOKS:
-        return books[item].authors;
-      case ListKind::DOWNLOADED:
-        return downloaded[item].authors;
-      case ListKind::ROOT:
-      case ListKind::FACETS:
-        return {};
-    }
-    return {};
-  };
-  const auto rowValue = [this](const int i) -> std::string {
-    if (isPrevPageRow(static_cast<size_t>(i)) || isNextPageRow(static_cast<size_t>(i))) return {};
-    const size_t item = toItemIndex(static_cast<size_t>(i));
-    if (listKind == ListKind::DOWNLOADED) return tr(STR_BO_DOWNLOADED);
-    if (listKind != ListKind::BOOKS) return {};
-    if (item < booksDownloaded.size() && booksDownloaded[item]) return tr(STR_BO_DOWNLOADED);
-    return percentText(books[item].progressPercent);
-  };
-  const bool twoLine = listKind == ListKind::BOOKS || listKind == ListKind::DOWNLOADED;
-  GUI.drawList(renderer, Rect{0, contentTop, pageWidth, contentHeight}, static_cast<int>(count), selectorIndex,
-               rowTitle, twoLine ? std::function<std::string(int)>(rowSubtitle) : nullptr, nullptr, rowValue);
   renderer.displayBuffer();
 }
 
@@ -472,7 +608,7 @@ void BookOrbitCatalogBrowserActivity::renderDetail(const int pageWidth, const in
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int x = metrics.contentSidePadding;
   const int width = pageWidth - 2 * metrics.contentSidePadding;
-  int y = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  int y = listTop();
 
   const int titleLine = renderer.getLineHeight(UI_12_FONT_ID);
   const auto titleLines = renderer.wrappedText(UI_12_FONT_ID, detail.title.c_str(), width, 3, EpdFontFamily::BOLD);
@@ -486,17 +622,26 @@ void BookOrbitCatalogBrowserActivity::renderDetail(const int pageWidth, const in
     renderer.drawText(UI_10_FONT_ID, x, y, authors.c_str(), true);
     y += bodyLine;
   }
+  if (!detail.seriesName.empty()) {
+    const auto series = renderer.truncatedText(UI_10_FONT_ID, seriesText(detail.seriesName, detail.seriesIndex).c_str(), width);
+    renderer.drawText(UI_10_FONT_ID, x, y, series.c_str());
+    y += bodyLine;
+  }
+  std::string reading = statusLabel(detail.readStatus);
+  if (detail.progressPercent >= 0) reading += " / " + std::to_string(static_cast<int>(detail.progressPercent + 0.5f)) + "%";
+  renderer.drawText(UI_10_FONT_ID, x, y, reading.c_str());
+  y += bodyLine;
   // One state line: local copy, or the size of the first downloadable file, or why nothing can be done.
   std::string stateLine;
   if (!detailLocalPath.empty()) {
-    stateLine = tr(STR_BO_DOWNLOADED);
+    stateLine = std::string("EPUB / ") + tr(STR_BO_DOWNLOADED);
   } else if (!detail.files.empty() && detail.files[0].sizeBytes > 0) {
-    stateLine = formatSize(detail.files[0].sizeBytes);
+    stateLine = "EPUB / " + formatSize(detail.files[0].sizeBytes);
   } else if (detail.files.empty() && !offline) {
     stateLine = tr(STR_BOOKORBIT_NO_COMPATIBLE_FILES);
   }
   if (!stateLine.empty()) {
-    renderer.drawText(UI_10_FONT_ID, x, y, stateLine.c_str(), false);
+    renderer.drawText(UI_10_FONT_ID, x, y, stateLine.c_str(), true);
     y += bodyLine;
   }
   if (!detailError.empty()) {
@@ -521,7 +666,7 @@ void BookOrbitCatalogBrowserActivity::renderDetail(const int pageWidth, const in
       case DetailRowKind::OFFLINE_UNAVAILABLE:
         return tr(STR_BO_DOWNLOAD_WHEN_ONLINE);
       case DetailRowKind::READ_STATUS:
-        return std::string(tr(STR_BOOKORBIT_READ_STATUS)) + ": " + readStatusDisplayText(detail.readStatus);
+        return std::string(tr(STR_BOOKORBIT_READ_STATUS)) + ": " + statusLabel(detail.readStatus);
       case DetailRowKind::RATING:
         return std::string(tr(STR_BOOKORBIT_RATING)) + ": " + ratingDisplayText(detail.rating);
     }
@@ -544,7 +689,7 @@ void BookOrbitCatalogBrowserActivity::renderDetail(const int pageWidth, const in
         break;
       case DetailRowKind::READ_STATUS:
       case DetailRowKind::RATING:
-        confirm = tr(STR_TOGGLE);
+        confirm = tr(STR_OPEN);
         break;
       case DetailRowKind::OFFLINE_UNAVAILABLE:
         break;
@@ -555,8 +700,13 @@ void BookOrbitCatalogBrowserActivity::renderDetail(const int pageWidth, const in
   renderer.displayBuffer();
 }
 void BookOrbitCatalogBrowserActivity::reportSessionError(const BOClient::Error error) {
-  state = BrowserState::ERROR;
-  errorMessage = BOClient::errorString(error);
+  if (paging) {
+    state = BrowserState::BROWSING;
+    listNotice = localizedError(error);
+  } else {
+    state = BrowserState::ERROR;
+    errorMessage = localizedError(error);
+  }
   requestUpdate();
 }
 
@@ -620,12 +770,20 @@ void BookOrbitCatalogBrowserActivity::loadRoot() {
     BookOrbitCatalogCache::Meta meta;
     if (catalogCache && catalogCache->loadRoot(result, meta)) offlineSavedDate = formatSavedDate(meta.savedAt);
   }
-  // 已下載 is a section of this one library, first; search only when it can work.
   std::vector<BOClient::Section> rows;
   rows.reserve(result.size() + 2);
-  if (library) rows.push_back({ROOT_DOWNLOADED, tr(STR_BO_DOWNLOADED)});
-  for (auto& s : result) rows.push_back(std::move(s));
-  if (!offline) rows.push_back({ROOT_SEARCH, tr(STR_SEARCH)});
+  if (!offline) rows.push_back({ROOT_SEARCH, tr(STR_BO_FIND)});
+  auto addSection = [&](const char* id) {
+    for (auto& section : result) if (section.id == id) rows.push_back({id, sectionLabel(id)});
+  };
+  addSection("continue-reading");
+  if (library) rows.push_back({ROOT_DOWNLOADED, tr(STR_BO_LOCAL)});
+  for (const char* id : {"all-books", "recent", "authors", "series", "libraries", "collections", "smart-scopes"}) addSection(id);
+  for (auto& section : result) if (!sectionLabel(section.id)) rows.push_back(std::move(section));
+  location = tr(STR_BO_LIBRARY);
+  localBookCount = library ? library->count() : 0;
+  listNotice.clear();
+  totalBooks = 0;
 
   listKind = ListKind::ROOT;
   facetKind = FacetKind::NONE;
@@ -659,15 +817,15 @@ void BookOrbitCatalogBrowserActivity::loadBooks(const int page) {
   // The ERROR screen's Retry reloads `listKind` at `currentPage`, so both name THIS request from
   // the start -- otherwise a failed list load would retry the previous screen (the root) instead.
   listKind = ListKind::BOOKS;
-  currentPage = page;
-  currentQuery.page = page;
+  BOClient::BookQuery request = currentQuery;
+  request.page = page;
   BOClient::BookPage result;
   offlineSavedDate.clear();
   bool fromCache = false;
   if (!offline) {
-    const BOClient::Error error = catalogSession().fetchBooks(currentQuery, result);
+    const BOClient::Error error = catalogSession().fetchBooks(request, result);
     if (error == BOClient::OK) {
-      if (catalogCache && page == 0) catalogCache->saveBooks(currentQuery, result, nowEpochSeconds());
+      if (catalogCache && page == 0) catalogCache->saveBooks(request, result, nowEpochSeconds());
     } else if (isTransportFailure(error)) {
       offline = true;
       catalogSessionCache.clear();
@@ -678,10 +836,8 @@ void BookOrbitCatalogBrowserActivity::loadBooks(const int page) {
   }
   if (offline) {
     BookOrbitCatalogCache::Meta meta;
-    if (!catalogCache || !catalogCache->loadBooks(currentQuery, result, meta)) {
-      state = BrowserState::ERROR;
-      errorMessage = tr(STR_BO_OFFLINE_NO_COPY);
-      requestUpdate();
+    if (!catalogCache || !catalogCache->loadBooks(request, result, meta)) {
+      reportSessionError(BOClient::NETWORK_ERROR);
       return;
     }
     fromCache = true;
@@ -689,6 +845,9 @@ void BookOrbitCatalogBrowserActivity::loadBooks(const int page) {
   }
   listKind = ListKind::BOOKS;
   books = std::move(result.items);
+  currentQuery = request;
+  totalBooks = result.total;
+  listNotice.clear();
   std::vector<BOClient::Section>().swap(sections);
   std::vector<BOClient::FacetEntry>().swap(facets);
   std::vector<BookOrbitLibrary::Entry>().swap(downloaded);
@@ -704,11 +863,8 @@ void BookOrbitCatalogBrowserActivity::loadBooks(const int page) {
 void BookOrbitCatalogBrowserActivity::loadFacets(const int page) {
   retryNetworkIfLinkUp();
   listKind = ListKind::FACETS;  // see loadBooks(): Retry must reload this request
-  currentPage = page;
   if (offline) {
-    state = BrowserState::ERROR;
-    errorMessage = tr(STR_BO_OFFLINE_NO_COPY);
-    requestUpdate();
+    reportSessionError(BOClient::NETWORK_ERROR);
     return;
   }
   std::string sectionId;
@@ -737,9 +893,7 @@ void BookOrbitCatalogBrowserActivity::loadFacets(const int page) {
     if (isTransportFailure(error)) {
       offline = true;
       catalogSessionCache.clear();
-      state = BrowserState::ERROR;
-      errorMessage = tr(STR_BO_OFFLINE_NO_COPY);
-      requestUpdate();
+      reportSessionError(error);
       return;
     }
     reportSessionError(error);
@@ -747,6 +901,8 @@ void BookOrbitCatalogBrowserActivity::loadFacets(const int page) {
   }
   listKind = ListKind::FACETS;
   facets = std::move(result.items);
+  listNotice.clear();
+  totalBooks = 0;
   std::vector<BOClient::Section>().swap(sections);
   std::vector<BOClient::BookSummary>().swap(books);
   std::vector<uint8_t>().swap(booksDownloaded);
@@ -758,7 +914,8 @@ void BookOrbitCatalogBrowserActivity::loadFacets(const int page) {
 }
 
 void BookOrbitCatalogBrowserActivity::loadDownloaded(const int page) {
-  const int pageSize = std::max(1, listPageItems() - 2);  // leave room for pager rows
+  listKind = ListKind::DOWNLOADED;
+  const int pageSize = listPageItems();
   std::vector<BookOrbitLibrary::Entry> rows(static_cast<size_t>(pageSize) + 1);
   size_t got = 0;
   if (library) got = library->page(static_cast<size_t>(page) * pageSize, rows.data(), rows.size());
@@ -782,24 +939,9 @@ void BookOrbitCatalogBrowserActivity::activateSelected() {
   const size_t count = displayCount();
   if (count == 0 || static_cast<size_t>(selectorIndex) >= count) return;
 
-  if (isPrevPageRow(selectorIndex) || isNextPageRow(selectorIndex)) {
-    const int target = isPrevPageRow(selectorIndex) ? currentPage - 1 : currentPage + 1;
-    navigationHistory.push({listKind, facetKind, currentQuery, currentPage, selectorIndex});
-    state = BrowserState::LOADING;
-    statusMessage = tr(STR_LOADING);
-    requestUpdate(true);
-    switch (listKind) {
-      case ListKind::FACETS:
-        loadFacets(target);
-        break;
-      case ListKind::DOWNLOADED:
-        loadDownloaded(target);
-        break;
-      case ListKind::BOOKS:
-      case ListKind::ROOT:
-        loadBooks(target);
-        break;
-    }
+  if (listKind == ListKind::BOOKS && selectorIndex == 0) {
+    retryNetworkIfLinkUp();
+    if (!offline) { choiceIndex = 0; state = BrowserState::OPTIONS; requestUpdate(); }
     return;
   }
 
@@ -811,7 +953,8 @@ void BookOrbitCatalogBrowserActivity::activateSelected() {
         launchSearch();
         return;
       }
-      navigationHistory.push({ListKind::ROOT, FacetKind::NONE, {}, 0, selectorIndex});
+      navigationHistory.push({ListKind::ROOT, FacetKind::NONE, {}, 0, selectorIndex, location});
+      location = std::string(tr(STR_BO_LIBRARY)) + " / " + section.title;
       state = BrowserState::LOADING;
       statusMessage = tr(STR_LOADING);
       requestUpdate(true);
@@ -851,7 +994,8 @@ void BookOrbitCatalogBrowserActivity::activateSelected() {
     }
     case ListKind::FACETS: {
       const BOClient::FacetEntry facet = facets[itemIndex];
-      navigationHistory.push({ListKind::FACETS, facetKind, currentQuery, currentPage, selectorIndex});
+      navigationHistory.push({ListKind::FACETS, facetKind, currentQuery, currentPage, selectorIndex, location});
+      location += " / " + facet.title;
       state = BrowserState::LOADING;
       statusMessage = tr(STR_LOADING);
       requestUpdate(true);
@@ -889,6 +1033,8 @@ void BookOrbitCatalogBrowserActivity::activateSelected() {
 }
 
 void BookOrbitCatalogBrowserActivity::openBookDetail(const BOClient::BookSummary& book) {
+  retryDetail = false;
+  retryBook = book;
   state = BrowserState::LOADING;
   statusMessage = tr(STR_LOADING);
   requestUpdate(true);
@@ -904,6 +1050,7 @@ void BookOrbitCatalogBrowserActivity::openBookDetail(const BOClient::BookSummary
       offline = true;
       catalogSessionCache.clear();
     } else {
+      retryDetail = true;
       reportSessionError(error);
       return;
     }
@@ -915,9 +1062,13 @@ void BookOrbitCatalogBrowserActivity::openBookDetail(const BOClient::BookSummary
     result.title = book.title;
     result.authors = book.authors;
     result.readStatus = book.readStatus;
+    result.seriesName = book.seriesName;
+    result.seriesIndex = book.seriesIndex;
+    result.progressPercent = book.progressPercent;
   }
   detail = std::move(result);
   detailError.clear();
+  detailChanged = false;
   resolveLocalCopy();
   buildDetailRows();
   detailSelectorIndex = 0;
@@ -1060,7 +1211,7 @@ void BookOrbitCatalogBrowserActivity::downloadFile(const int fileIndex) {
     LOG_ERR("BOCatalog", "Download failed: %s", BOClient::errorString(result));
     detailError = result == BOClient::ABORTED
                       ? std::string(tr(STR_BO_DOWNLOAD_FAILED))
-                      : std::string(tr(STR_BO_DOWNLOAD_FAILED)) + ": " + BOClient::errorString(result);
+                      : std::string(tr(STR_BO_DOWNLOAD_FAILED)) + ": " + localizedError(result);
     if (isTransportFailure(result) && !wifiConnected()) {
       offline = true;
       buildDetailRows();
@@ -1111,6 +1262,7 @@ void BookOrbitCatalogBrowserActivity::navigateBack() {
   statusMessage = tr(STR_LOADING);
   requestUpdate();
 
+  location = frame.location;
   facetKind = frame.facetKind;
   currentQuery = frame.query;
   switch (frame.listKind) {
@@ -1133,51 +1285,74 @@ void BookOrbitCatalogBrowserActivity::navigateBack() {
     requestUpdate();
   }
 }
-void BookOrbitCatalogBrowserActivity::cycleReadStatus() {
-  // Fixed cycle over every value setReadStatus() accepts. A current value the list doesn't contain
-  // starts the cycle at index 0 rather than refusing to cycle.
-  int currentIndex = -1;
-  for (size_t i = 0; i < BOClient::SETTABLE_READ_STATUS_COUNT; i++) {
-    if (detail.readStatus == BOClient::SETTABLE_READ_STATUSES[i]) {
-      currentIndex = static_cast<int>(i);
-      break;
-    }
-  }
-  const std::string nextStatus =
-      BOClient::SETTABLE_READ_STATUSES[static_cast<size_t>(currentIndex + 1) % BOClient::SETTABLE_READ_STATUS_COUNT];
-
+void BookOrbitCatalogBrowserActivity::applyChoice() {
+  if (state == BrowserState::READ_STATUS) { setReadStatus(choiceIndex); return; }
+  if (state == BrowserState::RATING) { setRating(choiceIndex); return; }
+  if (choiceIndex == 10) { launchSearch(); return; }
+  const auto previous = currentQuery;
+  const int previousPage = currentPage, previousIndex = selectorIndex;
+  if (choiceIndex < 6) currentQuery.sort = SORTS[choiceIndex];
+  else currentQuery.readStatus = FILTERS[choiceIndex - 6];
+  paging = true;  // Keep the visible list and its query if this replacement fails.
   state = BrowserState::LOADING;
   statusMessage = tr(STR_LOADING);
   requestUpdate(true);
+  loadBooks(0);
+  paging = false;
+  if (!listNotice.empty()) { currentQuery = previous; currentPage = previousPage; selectorIndex = previousIndex; }
+  requestUpdate();
+}
 
-  std::string outStatus;
-  const BOClient::Error error = catalogSession().setReadStatus(detail.id, nextStatus, outStatus);
-  if (error != BOClient::OK) {
-    LOG_ERR("BOCatalog", "Set read-status failed: %s", BOClient::errorString(error));
-    reportSessionError(error);
-    return;
+void BookOrbitCatalogBrowserActivity::returnFromDetail() {
+  detailError.clear();
+  markDownloadedBooks();
+  for (auto& book : books) if (book.id == detail.id) {
+    book.readStatus = detail.readStatus;
+    book.progressPercent = detail.progressPercent;
   }
-  detail.readStatus = outStatus;
+  state = BrowserState::BROWSING;
+  if (detailChanged && listKind == ListKind::BOOKS) {
+    const int savedIndex = selectorIndex;
+    const int page = currentPage;
+    paging = true;
+    loadBooks(page);
+    // A status change can empty the last server page. Move to the preceding page once.
+    if (listNotice.empty() && books.empty() && page > 0) loadBooks(page - 1);
+    paging = false;
+    selectorIndex = std::max(0, std::min(savedIndex, static_cast<int>(displayCount()) - 1));
+    // If the refresh failed, never leave a known nonmatching row under the active filter.
+    if (!listNotice.empty() && !currentQuery.readStatus.empty()) {
+      books.erase(std::remove_if(books.begin(), books.end(), [this](const BOClient::BookSummary& book) {
+        return !BookOrbitCatalogBrowserPolicy::matchesReadFilter(book.readStatus, currentQuery.readStatus);
+      }), books.end());
+      markDownloadedBooks();
+      selectorIndex = std::min(selectorIndex, static_cast<int>(displayCount()) - 1);
+    }
+  }
+  detailChanged = false;
+  requestUpdate();
+}
+
+void BookOrbitCatalogBrowserActivity::setReadStatus(int index) {
+  state = BrowserState::LOADING;
+  statusMessage = tr(STR_LOADING);
+  requestUpdate(true);
+  std::string outStatus;
+  const auto error = catalogSession().setReadStatus(detail.id, BOClient::SETTABLE_READ_STATUSES[index], outStatus);
+  if (error == BOClient::OK) { detail.readStatus = outStatus; detailChanged = true; }
+  else detailError = localizedError(error);
   state = BrowserState::DETAIL;
   requestUpdate();
 }
 
-void BookOrbitCatalogBrowserActivity::cycleRating() {
-  // unrated(-1) -> 1 -> ... -> 5 -> unrated. 0 is wire-legal but never produced here.
-  const int nextRating = detail.rating < 0 ? 1 : (detail.rating >= 5 ? -1 : detail.rating + 1);
-
+void BookOrbitCatalogBrowserActivity::setRating(int index) {
   state = BrowserState::LOADING;
   statusMessage = tr(STR_LOADING);
   requestUpdate(true);
-
-  int outRating = -1;
-  const BOClient::Error error = catalogSession().setRating(detail.id, nextRating, outRating);
-  if (error != BOClient::OK) {
-    LOG_ERR("BOCatalog", "Set rating failed: %s", BOClient::errorString(error));
-    reportSessionError(error);
-    return;
-  }
-  detail.rating = outRating;
+  int rating = -1;
+  const auto error = catalogSession().setRating(detail.id, index == 0 ? -1 : index, rating);
+  if (error == BOClient::OK) { detail.rating = rating; detailChanged = true; }
+  else detailError = localizedError(error);
   state = BrowserState::DETAIL;
   requestUpdate();
 }
@@ -1199,8 +1374,9 @@ void BookOrbitCatalogBrowserActivity::launchSearch() {
 }
 
 void BookOrbitCatalogBrowserActivity::performSearch(const std::string& query) {
-  navigationHistory.push({listKind, facetKind, currentQuery, currentPage, selectorIndex});
-  currentQuery = BOClient::BookQuery{};
+  navigationHistory.push({listKind, facetKind, currentQuery, currentPage, selectorIndex, location});
+  if (listKind != ListKind::BOOKS) currentQuery = BOClient::BookQuery{};
+  location += " / " + std::string(tr(STR_SEARCH)) + ": " + query;
   currentQuery.searchText = query;
   facetKind = FacetKind::NONE;
   state = BrowserState::LOADING;

@@ -57,12 +57,26 @@ TEST(ProgressSyncRetry, DisabledProviderAndChangedBookCannotKeepHeartbeat) {
 
 TEST(ProgressSyncRetry, PeriodicEligibilitySupportsIndependentProviders) {
   using namespace ProgressSyncSchedule;
-  EXPECT_EQ(enabledProviders(true, true, true, true, false), 1u);
-  EXPECT_EQ(enabledProviders(true, true, false, false, true), 2u) << "BookOrbit-only must schedule";
-  EXPECT_EQ(enabledProviders(true, true, true, false, true), 2u) << "KOSync auto-sync gating is independent";
-  EXPECT_EQ(enabledProviders(true, true, true, true, true), 3u);
-  EXPECT_EQ(enabledProviders(false, true, true, true, true), 0u);
-  EXPECT_EQ(enabledProviders(true, false, true, true, true), 0u);
+  EXPECT_EQ(enabledProviders(true, true, true), 2u) << "BookOrbit is the scheduled provider";
+  EXPECT_EQ(enabledProviders(true, true, false), 0u) << "no BookOrbit account: nothing to schedule";
+  EXPECT_EQ(enabledProviders(false, true, true), 0u);
+  EXPECT_EQ(enabledProviders(true, false, true), 0u);
+}
+
+TEST(ProgressSyncRetry, ARetiredKOSyncRetryLeftByAnOlderBuildIsPrunedNotScheduled) {
+  using namespace ProgressSyncSchedule;
+  State state;
+  state.observe(Provider::KOSync, "/book.epub", Outcome::Retry);
+  ASSERT_TRUE(state.pending(Provider::KOSync));
+  state.prune("/book.epub", enabledProviders(true, true, false));
+  EXPECT_EQ(state.providers, 0u);
+  EXPECT_EQ(sleepDelayMicros(Hour1, enabledProviders(true, true, false)), 0u)
+      << "KOSync credentials alone must never arm a timer wake";
+  state.observe(Provider::KOSync, "/book.epub", Outcome::Retry);
+  state.observe(Provider::BookOrbit, "/book.epub", Outcome::Retry);
+  state.prune("/book.epub", enabledProviders(true, true, true));
+  EXPECT_FALSE(state.pending(Provider::KOSync));
+  EXPECT_TRUE(state.pending(Provider::BookOrbit));
 }
 
 TEST(ProgressSyncRetry, SuccessAndNoPendingStillContinueConfiguredCadence) {
@@ -132,13 +146,38 @@ TEST(ProgressSyncRetry, HeadlessTimerPathDoesNotRenderAndAlwaysTearsRadioDown) {
   EXPECT_EQ(body.find("display."), std::string::npos);
   EXPECT_EQ(body.find("renderer."), std::string::npos);
   EXPECT_EQ(body.find("activityManager."), std::string::npos);
-  EXPECT_NE(body.find("KOReaderAutoSync::syncHeadlessly(path)"), std::string::npos);
   EXPECT_NE(body.find("BookOrbitAutoSync::syncHeadlessly(path)"), std::string::npos);
+  // BookOrbit is the only provider: the retired independent KOSync transaction never runs on a
+  // timer wake, and its credential file cannot gate the overnight cadence.
+  EXPECT_EQ(body.find("KOReaderAutoSync"), std::string::npos);
+  EXPECT_EQ(body.find("KOREADER_STORE"), std::string::npos);
   EXPECT_LT(body.find("WiFi.mode(WIFI_OFF)"), body.find("powerManager.startDeepSleep("));
   const auto hal = source("/lib/hal/HalPowerManager.cpp");
   EXPECT_LT(hal.find("esp_sleep_enable_timer_wakeup(retryDelayMicros)"),
             hal.find("freeink::PowerManager::deepSleepUntilPowerButton()"));
   EXPECT_NE(hal.find("esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER)"), std::string::npos);
+}
+
+TEST(ProgressSyncRetry, EverySyncRouteRunsOnlyTheBookOrbitProviderInsideOneBatch) {
+  // Sleep, timer, close and open are the only network routes; none may start while reading.
+  const auto main = source("/src/main.cpp");
+  const auto manager = source("/src/activities/ActivityManager.cpp");
+  for (const auto& [text, call] :
+       {std::pair{main, "BookOrbitAutoSync::syncOnSleep(renderer)"}, std::pair{main, "BookOrbitAutoSync::syncHeadlessly(path)"},
+        std::pair{manager, "BookOrbitAutoSync::syncOnClose(renderer)"},
+        std::pair{manager, "BookOrbitAutoSync::syncOnOpen(path, renderer)"}}) {
+    const auto at = text.find(call);
+    ASSERT_NE(at, std::string::npos) << call;
+    EXPECT_LT(text.rfind("ProgressSyncNetwork::Batch syncBatch(", at), at) << call;
+  }
+  for (const auto* path : {"/src/main.cpp", "/src/activities/ActivityManager.cpp",
+                           "/src/activities/reader/EpubReaderActivity.cpp"}) {
+    const auto text = source(path);
+    EXPECT_EQ(text.find("KOReaderAutoSync::sync"), std::string::npos) << path;
+    EXPECT_EQ(text.find("KOReaderSyncActivity"), std::string::npos) << path;
+  }
+  EXPECT_EQ(source("/src/util/ProgressSyncNetwork.cpp").find("KOREADER_STORE"), std::string::npos);
+  EXPECT_EQ(source("/src/util/ProgressSyncRetry.cpp").find("KOREADER_STORE"), std::string::npos);
 }
 
 TEST(ProgressSyncRetry, ReaderResumeSkipsNetworkSyncAndAppliesStagedBeforeSnapshotAndReader) {
@@ -390,7 +429,7 @@ TEST(ProgressSyncRetry, BookOrbitResetMarkerRoundTripsAcrossReboot) {
 }
 
 TEST(ProgressSyncRetry, ProviderHardwarePathsValidateBeforeWifiAndSuppressSideWork) {
-  for (const auto* path : {"/src/util/KOReaderAutoSync.cpp", "/src/util/BookOrbitAutoSync.cpp"}) {
+  for (const auto* path : {"/src/util/BookOrbitAutoSync.cpp"}) {
     const auto text = source(path);
     const auto start = text.find("ProgressSyncRetry::Outcome synchronizeProgress(");
     ASSERT_NE(start, std::string::npos);
@@ -413,7 +452,7 @@ TEST(ProgressSyncRetry, ProviderHardwarePathsValidateBeforeWifiAndSuppressSideWo
 }
 
 TEST(ProgressSyncRetry, DeferredApplyOccursAfterProviderTransactionReturnsAndInvalidatesSnapshot) {
-  for (const auto* path : {"/src/util/KOReaderAutoSync.cpp", "/src/util/BookOrbitAutoSync.cpp"}) {
+  for (const auto* path : {"/src/util/BookOrbitAutoSync.cpp"}) {
     const auto text = source(path);
     const auto wrapper = text.find("void syncOnOpen(");
     ASSERT_NE(wrapper, std::string::npos);
@@ -476,7 +515,7 @@ TEST(ProgressSyncRetry, HeadlessWakeReArmsRetainedDelayOnlyForUnreadableStores) 
   ASSERT_NE(start, std::string::npos);
   const auto body = main.substr(start, main.find("\n}\n", start) - start);
   for (const char* store : {"APP_STATE.loadFromFile()", "loadedOrAbsent(SETTINGS)", "loadedOrAbsent(WIFI_STORE)",
-                            "loadedOrAbsent(KOREADER_STORE)", "loadedOrAbsent(BOOKORBIT_STORE)"}) {
+                            "loadedOrAbsent(BOOKORBIT_STORE)"}) {
     EXPECT_LT(body.find(store), body.find("ProgressSyncRetry::sleepDelayMicros()")) << store;
   }
   EXPECT_NE(main.find("Storage.probePath(Store::getFilePath()) == HalStorage::PathStatus::Absent"), std::string::npos);

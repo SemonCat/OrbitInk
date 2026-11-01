@@ -18,7 +18,6 @@
 #include "BookOrbitCredentialStore.h"
 #include "CrossPointSettings.h"
 #include "FontInstaller.h"
-#include "KOReaderCredentialStore.h"
 #include "OpdsServerStore.h"
 #include "OtaChannel.h"
 #include "SdCardFontSystem.h"
@@ -90,26 +89,6 @@ bool isProtectedItemName(const String& name) {
 }
 
 using SyncSettingsWebPolicy::BookOrbitState;
-using SyncSettingsWebPolicy::KOSyncState;
-
-KOSyncState readKOSyncState() {
-  return {.serverUrl = KOREADER_STORE.getServerUrl(),
-          .username = KOREADER_STORE.getUsername(),
-          .password = KOREADER_STORE.getPassword(),
-          .matchMethod = static_cast<uint8_t>(KOREADER_STORE.getMatchMethod()),
-          .sendMetadata = KOREADER_STORE.getSendMetadata(),
-          .syncBehavior = static_cast<uint8_t>(KOREADER_STORE.getSyncBehavior()),
-          .autoSync = KOREADER_STORE.getAutoSyncEnabled()};
-}
-
-void applyKOSyncState(const KOSyncState& state) {
-  KOREADER_STORE.setServerUrl(state.serverUrl);
-  KOREADER_STORE.setCredentials(state.username, state.password);
-  KOREADER_STORE.setMatchMethod(static_cast<DocumentMatchMethod>(state.matchMethod));
-  KOREADER_STORE.setSendMetadata(state.sendMetadata);
-  KOREADER_STORE.setSyncBehavior(static_cast<KOReaderSyncBehavior>(state.syncBehavior));
-  KOREADER_STORE.setAutoSyncEnabled(state.autoSync);
-}
 
 BookOrbitState readBookOrbitState() {
   return {.serverUrl = BOOKORBIT_STORE.getServerUrl(),
@@ -233,9 +212,6 @@ void CrossPointWebServer::begin() {
   server->on("/settings", HTTP_GET, [this] { handleSettingsPage(); });
   server->on("/api/settings", HTTP_GET, [this] { handleGetSettings(); });
   server->on("/api/settings", HTTP_POST, [this] { handlePostSettings(); });
-  server->on("/api/kosync", HTTP_GET, [this] { handleGetKOSync(); });
-  server->on("/api/kosync", HTTP_POST, [this] { handlePostKOSync(); });
-  server->on("/api/kosync/clear", HTTP_POST, [this] { handleClearKOSync(); });
   server->on("/api/bookorbit", HTTP_GET, [this] { handleGetBookOrbit(); });
   server->on("/api/bookorbit", HTTP_POST, [this] { handlePostBookOrbit(); });
   server->on("/api/bookorbit/clear", HTTP_POST, [this] { handleClearBookOrbit(); });
@@ -1339,10 +1315,7 @@ void CrossPointWebServer::handleGetSettings() const {
       }
       case SettingType::STRING: {
         doc["type"] = "string";
-        if (SyncSettingsWebPolicy::isLegacySecretSetting(s.key)) {
-          doc["hasPassword"] = !KOREADER_STORE.getPassword().empty();
-          doc["configured"] = KOREADER_STORE.hasCredentials();
-        } else if (s.stringGetter) {
+        if (s.stringGetter) {
           doc["value"] = s.stringGetter();
         } else if (s.stringMaxLen > 0) {
           doc["value"] = reinterpret_cast<const char*>(&SETTINGS) + s.stringOffset;
@@ -1392,27 +1365,8 @@ void CrossPointWebServer::handlePostSettings() {
   int applied = 0;
   int generalApplied = 0;
 
-  const KOSyncState koBefore = readKOSyncState();
-  KOSyncState koAfter;
-  const auto koResult = SyncSettingsWebPolicy::parseLegacyKOSyncUpdate(doc, koBefore, koAfter);
-  if (!koResult.valid) {
-    server->send(400, "text/plain", koResult.error);
-    return;
-  }
-  if (koResult.hasChanges) {
-    if (!SyncSettingsWebPolicy::persistWithRollback(koBefore, koAfter, applyKOSyncState,
-                                                    [] { return KOREADER_STORE.saveToFile(); })) {
-      server->send(500, "text/plain", "Failed to save KOReader Sync settings");
-      return;
-    }
-    for (JsonPairConst entry : doc.as<JsonObjectConst>()) {
-      if (SyncSettingsWebPolicy::isLegacyKOSyncSetting(entry.key().c_str())) applied++;
-    }
-  }
-
   for (const auto& s : settings) {
     if (!s.key) continue;
-    if (SyncSettingsWebPolicy::isLegacyKOSyncSetting(s.key)) continue;
     if (!doc[s.key].is<JsonVariant>()) continue;
 
     switch (s.type) {
@@ -1473,53 +1427,6 @@ void CrossPointWebServer::handlePostSettings() {
 
   LOG_DBG("WEB", "Applied %d setting(s)", applied);
   server->send(200, "text/plain", String("Applied ") + String(applied) + " setting(s)");
-}
-
-void CrossPointWebServer::handleGetKOSync() const {
-  JsonDocument response;
-  SyncSettingsWebPolicy::writeKOSyncResponse(response, readKOSyncState());
-  sendJson(server.get(), 200, response);
-}
-
-void CrossPointWebServer::handlePostKOSync() {
-  JsonDocument request;
-  String errorMessage;
-  if (!readBoundedJsonBody(server.get(), request, errorMessage)) {
-    server->send(400, "text/plain", errorMessage);
-    return;
-  }
-
-  const KOSyncState before = readKOSyncState();
-  KOSyncState after;
-  const auto result = SyncSettingsWebPolicy::parseKOSyncUpdate(request, before, after);
-  if (!result.valid) {
-    server->send(400, "text/plain", result.error);
-    return;
-  }
-
-  if (!SyncSettingsWebPolicy::persistWithRollback(before, after, applyKOSyncState,
-                                                  [] { return KOREADER_STORE.saveToFile(); })) {
-    server->send(500, "text/plain", "Failed to save KOReader Sync settings");
-    return;
-  }
-
-  JsonDocument response;
-  SyncSettingsWebPolicy::writeKOSyncResponse(response, after);
-  sendJson(server.get(), 200, response);
-}
-
-void CrossPointWebServer::handleClearKOSync() {
-  const KOSyncState before = readKOSyncState();
-  const KOSyncState after = SyncSettingsWebPolicy::withoutCredentials(before);
-  if (!SyncSettingsWebPolicy::persistWithRollback(before, after, applyKOSyncState,
-                                                  [] { return KOREADER_STORE.saveToFile(); })) {
-    server->send(500, "text/plain", "Failed to clear KOReader Sync credentials");
-    return;
-  }
-
-  JsonDocument response;
-  SyncSettingsWebPolicy::writeKOSyncResponse(response, after);
-  sendJson(server.get(), 200, response);
 }
 
 void CrossPointWebServer::handleGetBookOrbit() const {

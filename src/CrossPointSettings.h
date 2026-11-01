@@ -148,7 +148,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // value >= 2 and be appended at the END of the enumValues array in SettingsList.h, otherwise the
   // stored indices shift and existing saves are silently misinterpreted.
   enum LONG_PRESS_MENU_FUNCTION {
-    LP_MENU_KOSYNC = 0,
+    LP_MENU_KOSYNC = 0,  // retired action; a stored 0 behaves as LP_MENU_DISABLED
     LP_MENU_DISABLED = 1,
     LP_MENU_BOOKMARK = 2,
     LP_MENU_DICTIONARY = 3,
@@ -305,6 +305,13 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // Long-press Confirm function in EPUB reader (cycles through LONG_PRESS_MENU_FUNCTION values).
   // Defaults to Disabled so shortcut-based bookmark toggling remains opt-in.
   uint8_t longPressMenuFunction = LP_MENU_DISABLED;
+  // Settings UI choice index (0 停用, 1 書籤, 2 字典) <-> stored LONG_PRESS_MENU_FUNCTION value.
+  static constexpr uint8_t longPressMenuChoice(uint8_t stored) {
+    return stored == LP_MENU_BOOKMARK ? 1 : stored == LP_MENU_DICTIONARY ? 2 : 0;
+  }
+  static constexpr uint8_t longPressMenuStored(uint8_t choice) {
+    return choice == 1 ? LP_MENU_BOOKMARK : choice == 2 ? LP_MENU_DICTIONARY : LP_MENU_DISABLED;
+  }
   // UI Theme
   uint8_t uiTheme = LYRA;
   // Sunlight fading compensation

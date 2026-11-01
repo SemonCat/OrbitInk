@@ -29,7 +29,6 @@
 #include "settings/SettingsActivity.h"
 #include "util/BookOrbitAutoSync.h"
 #include "util/FullScreenMessageActivity.h"
-#include "util/KOReaderAutoSync.h"
 #include "util/ProgressSyncNetwork.h"
 #include "util/ProgressSyncDeferred.h"
 
@@ -173,7 +172,6 @@ void ActivityManager::loop() {
         // destination activity simply replaces this overlay.
         GUI.drawPopup(renderer, tr(STR_SYNC_PROGRESS));
         ProgressSyncNetwork::Batch syncBatch(APP_STATE.openEpubPath, &renderer);
-        KOReaderAutoSync::syncOnClose(renderer);
         BookOrbitAutoSync::syncOnClose(renderer);
       }
       if (!pendingReaderSyncPath.empty()) {
@@ -181,7 +179,6 @@ void ActivityManager::loop() {
         pendingReaderSyncPath.clear();
         ProgressSyncDeferred::applyForBook(path, renderer);
         ProgressSyncNetwork::Batch syncBatch(path, &renderer);
-        KOReaderAutoSync::syncOnOpen(path, renderer);
         BookOrbitAutoSync::syncOnOpen(path, renderer);
       }
       currentActivity->onEnter();
@@ -236,7 +233,7 @@ void ActivityManager::goToSettings() { replaceActivity(std::make_unique<Settings
 void ActivityManager::goToFileBrowser(std::string path) {
   // A short Back press can be configured to leave the reader directly for the
   // file browser instead of Home. That is still a book-close transition and
-  // must run the same KOSync push after the reader has released its memory.
+  // must run the same BookOrbit close sync after the reader has released its memory.
   syncOnReaderExit = isReaderActivity();
   replaceActivity(std::make_unique<FileBrowserActivity>(renderer, mappedInput, std::move(path)));
 }
@@ -296,7 +293,6 @@ void ActivityManager::goToReader(std::string path, const bool allowFastInitialRe
   if (checkRemoteProgress && !replacingReader) {
     if (ProgressSyncNetwork::available()) GUI.drawPopup(renderer, tr(STR_SYNC_PROGRESS));
     ProgressSyncNetwork::Batch syncBatch(path, &renderer);
-    KOReaderAutoSync::syncOnOpen(path, renderer);
     BookOrbitAutoSync::syncOnOpen(path, renderer);
   }
 

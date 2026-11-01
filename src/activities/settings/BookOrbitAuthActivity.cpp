@@ -36,7 +36,7 @@ void BookOrbitAuthActivity::onWifiSelectionComplete(const bool success) {
 
 void BookOrbitAuthActivity::performTestConnection() {
   // Bounded to these two requests on one session: modem sleep's latency has been observed to
-  // make the wolfSSL TLS handshake fail with http=-1 (same reasoning as KOReaderAuthActivity).
+  // make the wolfSSL TLS handshake fail with http=-1 (see KOSyncWifiPowerSaveGuard.h).
   const KOSyncWifiPowerSaveGuard wifiPowerSaveGuard;
   BookOrbitSyncClient::Session session;
 

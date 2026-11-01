@@ -2,7 +2,6 @@
 
 #include <HalGPIO.h>
 #include <BookOrbitCredentialStore.h>
-#include <KOReaderCredentialStore.h>
 #include <KOReaderDocumentId.h>
 #include <WiFi.h>
 
@@ -55,9 +54,7 @@ Batch::~Batch() {
 bool active() { return depth != 0; }
 
 bool available() {
-  return WIFI_STORE.getCredentialCount() > 0 &&
-         (BOOKORBIT_STORE.hasCredentials() ||
-          (KOREADER_STORE.getAutoSyncEnabled() && KOREADER_STORE.hasCredentials()));
+  return WIFI_STORE.getCredentialCount() > 0 && BOOKORBIT_STORE.hasCredentials();
 }
 
 std::string binaryDocument(const std::string& path) {

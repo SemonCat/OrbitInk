@@ -349,7 +349,6 @@
     <button class="save-btn" id="saveBtn" onclick="saveSettings()">Save Settings</button>
   </div>
 
-  <div id="kosync-container"></div>
   <div id="bookorbit-container"></div>
   <div id="wifi-container"></div>
   <div id="opds-container"></div>
@@ -556,10 +555,7 @@
       if (!response.ok) {
         throw new Error('Failed to load settings: ' + response.status);
       }
-      allSettings = (await response.json()).filter(function(setting) {
-        return !['koServerUrl', 'koUsername', 'koPassword', 'koMatchMethod',
-          'koSendMetadata', 'koSyncBehavior', 'koAutoSync'].includes(setting.key);
-      });
+      allSettings = await response.json();
 
       // Store original values
       originalValues = {};
@@ -653,7 +649,6 @@
   // --- Sync settings ---
   // Credentials are write-only: the APIs return state flags, never passwords
   // or password hashes. An omitted/blank password preserves the saved value.
-  let kosyncSettings = null;
   let bookOrbitSettings = null;
 
   function showSectionMessage(id, text, isError) {
@@ -663,109 +658,13 @@
     message.className = 'section-message ' + (isError ? 'error' : 'success');
   }
 
-  function renderKOSyncSection() {
-    const state = kosyncSettings || {};
-    const passwordHint = state.hasPassword ? 'Saved; leave blank to keep' : 'Enter password';
-    const configured = state.configured ? 'Configured' : 'Credentials incomplete';
-    document.getElementById('kosync-container').innerHTML =
-      '<div class="card sync-card"><h2>KOReader Sync (KOSync)</h2>' +
-      '<p class="section-help">Primary reading-progress sync. A blank server URL uses the built-in default. ' +
-        'BookOrbit below is optional and configured independently.</p>' +
-      '<div class="section-status">Status: ' + configured + '</div>' +
-      '<div class="setting-row"><label class="setting-name" for="kosync-url">Server URL</label>' +
-        '<span class="setting-control"><input type="text" id="kosync-url" maxlength="128" ' +
-          'value="' + escapeHtml(state.serverUrl || '') + '" placeholder="Default server"></span></div>' +
-      '<div class="setting-row"><label class="setting-name" for="kosync-user">Username</label>' +
-        '<span class="setting-control"><input type="text" id="kosync-user" maxlength="64" autocomplete="username" ' +
-          'value="' + escapeHtml(state.username || '') + '"></span></div>' +
-      '<div class="setting-row"><label class="setting-name" for="kosync-pass">Password</label>' +
-        '<span class="setting-control"><input type="password" id="kosync-pass" maxlength="64" ' +
-          'autocomplete="new-password" placeholder="' + passwordHint + '"></span></div>' +
-      '<div class="setting-row"><label class="setting-name" for="kosync-match">Document matching</label>' +
-        '<span class="setting-control"><select id="kosync-match">' +
-          '<option value="0"' + (state.matchMethod === 0 ? ' selected' : '') + '>Filename</option>' +
-          '<option value="1"' + (state.matchMethod === 1 ? ' selected' : '') + '>Binary content</option>' +
-        '</select></span></div>' +
-      '<div class="setting-row"><label class="setting-name" for="kosync-metadata">Send document metadata</label>' +
-        '<span class="setting-control"><select id="kosync-metadata">' +
-          '<option value="0"' + (!state.sendMetadata ? ' selected' : '') + '>Off</option>' +
-          '<option value="1"' + (state.sendMetadata ? ' selected' : '') + '>On</option>' +
-        '</select></span></div>' +
-      '<div class="setting-row"><label class="setting-name" for="kosync-behavior">Sync behavior</label>' +
-        '<span class="setting-control"><select id="kosync-behavior">' +
-          '<option value="0"' + (state.syncBehavior === 0 ? ' selected' : '') + '>Ask every time</option>' +
-          '<option value="1"' + (state.syncBehavior === 1 ? ' selected' : '') + '>Smart sync</option>' +
-        '</select></span></div>' +
-      '<div class="setting-row"><label class="setting-name" for="kosync-auto">Automatic sync</label>' +
-        '<span class="setting-control"><select id="kosync-auto">' +
-          '<option value="0"' + (!state.autoSync ? ' selected' : '') + '>Off</option>' +
-          '<option value="1"' + (state.autoSync ? ' selected' : '') + '>On</option>' +
-        '</select></span></div>' +
-      '<p class="section-help">Leave the password blank when saving to keep the existing password.</p>' +
-      '<div class="sync-actions">' +
-        '<button class="btn-small btn-save-server" onclick="saveKOSyncSettings()">Save KOReader Sync</button>' +
-        '<button class="btn-small btn-delete" onclick="clearKOSyncCredentials()">Clear credentials</button>' +
-      '</div><div id="kosync-message" class="section-message" role="status" aria-live="polite"></div></div>';
-  }
-
-  async function loadKOSyncSettings() {
-    try {
-      const response = await fetch('/api/kosync');
-      if (!response.ok) throw new Error(await response.text() || 'Failed to load');
-      kosyncSettings = await response.json();
-      renderKOSyncSection();
-    } catch (e) {
-      document.getElementById('kosync-container').innerHTML =
-        '<div class="card"><h2>KOReader Sync (KOSync)</h2><p style="color:#e74c3c;">Failed to load settings</p></div>';
-    }
-  }
-
-  async function saveKOSyncSettings() {
-    const password = document.getElementById('kosync-pass').value;
-    const data = {
-      serverUrl: document.getElementById('kosync-url').value,
-      username: document.getElementById('kosync-user').value,
-      matchMethod: Number(document.getElementById('kosync-match').value),
-      sendMetadata: document.getElementById('kosync-metadata').value === '1',
-      syncBehavior: Number(document.getElementById('kosync-behavior').value),
-      autoSync: document.getElementById('kosync-auto').value === '1'
-    };
-    if (password) data.password = password;
-
-    try {
-      const response = await fetch('/api/kosync', {
-        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data)
-      });
-      if (!response.ok) throw new Error(await response.text() || 'Save failed');
-      kosyncSettings = await response.json();
-      renderKOSyncSection();
-      showSectionMessage('kosync-message', 'KOReader Sync settings saved.', false);
-    } catch (e) {
-      showSectionMessage('kosync-message', 'Error: ' + e.message, true);
-    }
-  }
-
-  async function clearKOSyncCredentials() {
-    if (!confirm('Clear the saved KOReader Sync username and password?')) return;
-    try {
-      const response = await fetch('/api/kosync/clear', {method: 'POST'});
-      if (!response.ok) throw new Error(await response.text() || 'Clear failed');
-      kosyncSettings = await response.json();
-      renderKOSyncSection();
-      showSectionMessage('kosync-message', 'KOReader Sync credentials cleared.', false);
-    } catch (e) {
-      showSectionMessage('kosync-message', 'Error: ' + e.message, true);
-    }
-  }
-
   function renderBookOrbitSection() {
     const state = bookOrbitSettings || {};
     const passwordHint = state.hasPassword ? 'Saved; leave blank to keep' : 'Enter password';
     const configured = state.configured ? 'Configured' : 'Not connected';
     document.getElementById('bookorbit-container').innerHTML =
       '<div class="card sync-card"><h2>BookOrbit</h2>' +
-      '<p class="section-help">Optional self-hosted BookOrbit service. These credentials are independent from ' +
-        'KOReader Sync. Enter the server address you use; OrbitInk applies BookOrbit API normalization when connecting.</p>' +
+      '<p class="section-help">Connect your self-hosted BookOrbit library. Enter the server address you use; OrbitInk applies BookOrbit API normalization when connecting.</p>' +
       '<div class="section-status">Status: ' + configured + '</div>' +
       '<div class="setting-row"><label class="setting-name" for="bookorbit-url">Self-hosted server URL</label>' +
         '<span class="setting-control"><input type="text" id="bookorbit-url" maxlength="128" ' +
@@ -1061,7 +960,6 @@
   // stall long enough inside a single response to trip the firmware watchdog.
   (async () => {
     await loadSettings();
-    await loadKOSyncSettings();
     await loadBookOrbitSettings();
     await loadWifiNetworks();
     await loadOpdsServers();

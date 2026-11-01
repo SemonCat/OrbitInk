@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "BookOrbitCatalogClient.h"
+#include "BookOrbitJsonKeyDropper.h"
 #include "BookOrbitCredentialStore.h"
 #include "HalStorage.h"
 #include "KOSyncTransport.h"
@@ -55,7 +56,11 @@ class FakeKOSyncTransport final : public KOSyncTransport {
     const ScriptedResponse& resp = responses_[nextResponse_++];
     lastBody_ = resp.body;
     if (onData && !resp.body.empty()) {
-      onData(reinterpret_cast<const uint8_t*>(resp.body.data()), resp.body.size());
+      // chunkSize > 0 delivers the body the way a socket does: in arbitrary pieces.
+      const size_t step = chunkSize > 0 ? chunkSize : resp.body.size();
+      for (size_t at = 0; at < resp.body.size(); at += step) {
+        onData(reinterpret_cast<const uint8_t*>(resp.body.data()) + at, std::min(step, resp.body.size() - at));
+      }
     }
     return resp.httpCode;
   }
@@ -63,6 +68,7 @@ class FakeKOSyncTransport final : public KOSyncTransport {
   const std::string& getString() const override { return lastBody_; }
   void end() override {}
 
+  size_t chunkSize = 0;
   std::vector<std::string> urls;
   std::vector<RecordedRequest> requests;
   std::vector<std::pair<std::string, std::string>> headers;
@@ -357,7 +363,54 @@ TEST_F(BookOrbitCatalogClientTest, FetchBooksBodyIsBoundedRegardlessOfServerSize
   auto session = makeJsonSession({{200, body}});
   Client::BookQuery query;
   Client::BookPage page;
-  EXPECT_EQ(session->fetchBooks(query, page), Client::JSON_ERROR);
+  // One item above the retained cap fails the request. Never present a partial fixed-offset
+  // server page as complete: the browser keeps its previous page available for a safe retry.
+  ASSERT_EQ(session->fetchBooks(query, page), Client::JSON_ERROR);
+  EXPECT_TRUE(page.items.empty());
+}
+
+// ---- BookOrbitJsonKeyDropper ------------------------------------------------------------------
+
+namespace {
+std::string dropKeys(const std::string& json, size_t chunk, size_t cap = 1 << 20) {
+  static constexpr const char* KEYS[] = {"description", "related"};
+  std::string out;
+  BookOrbitJsonKeyDropper dropper(KEYS, 2, out, cap);
+  for (size_t at = 0; at < json.size(); at += chunk) {
+    dropper.feed(reinterpret_cast<const uint8_t*>(json.data()) + at, std::min(chunk, json.size() - at));
+  }
+  return out;
+}
+}  // namespace
+
+TEST(BookOrbitJsonKeyDropperTest, ReplacesDroppedValuesOfEveryShapeAtAnyChunkBoundary) {
+  const std::string in =
+      R"({"id":1,"description":"a \"quoted\" } ] { [ , : \\ tail","files":[{"id":2,"related":{"x":[1,{"y":"}"}]}}],)"
+      R"("related":[{"description":"nested"}],"n":{"description":12.5},"t":"description","z":[true,"description"]})";
+  const std::string want =
+      R"({"id":1,"description":null,"files":[{"id":2,"related":null}],"related":null,"n":{"description":null},)"
+      R"("t":"description","z":[true,"description"]})";
+  for (size_t chunk = 1; chunk <= in.size(); chunk++) {
+    ASSERT_EQ(dropKeys(in, chunk), want) << "chunk=" << chunk;
+  }
+  JsonDocument doc;
+  ASSERT_FALSE(deserializeJson(doc, want));
+}
+
+TEST(BookOrbitJsonKeyDropperTest, KeepsValuesThatOnlyLookLikeDroppedKeysAndPrimitivesBeforeWhitespace) {
+  // Whitespace between ':' and a dropped value is consumed with the value.
+  EXPECT_EQ(dropKeys(R"({ "description" : 42 , "k":"v"})", 3), R"({ "description" :null , "k":"v"})");
+  EXPECT_EQ(dropKeys(R"(["description",{"descriptions":"keep"}])", 2), R"(["description",{"descriptions":"keep"}])");
+}
+
+TEST(BookOrbitJsonKeyDropperTest, CapBoundsRetainedBytesAndReportsTruncation) {
+  static constexpr const char* KEYS[] = {"description"};
+  std::string out;
+  BookOrbitJsonKeyDropper dropper(KEYS, 1, out, 8);
+  const std::string in = R"({"description":"0123456789","a":1})";
+  dropper.feed(reinterpret_cast<const uint8_t*>(in.data()), in.size());
+  EXPECT_EQ(out.size(), 8u);
+  EXPECT_TRUE(dropper.truncated());
 }
 
 // ---- fetchSectionEntries ----------------------------------------------------------------------
@@ -371,6 +424,100 @@ TEST_F(BookOrbitCatalogClientTest, FetchSectionEntriesParsesFacetsAndExplicitHas
   EXPECT_EQ(page.items[0].id, "a1");
   EXPECT_EQ(page.items[0].bookCount, 3u);
   EXPECT_TRUE(page.hasNext);
+}
+
+TEST_F(BookOrbitCatalogClientTest, FetchSectionEntriesKeepsAWholeSixtyEntryServerPage) {
+  // Authors/series pages are 60 entries regardless of `size`; the next request asks for the
+  // server's next page, so every entry of this one must be kept (booksHref values are dropped).
+  std::string body = R"({"section":"authors","items":[)";
+  for (int i = 0; i < 60; i++) {
+    const std::string name = "作者名稱" + std::to_string(i);
+    body += std::string(i ? "," : "") + R"({"id":")" + name + R"(","title":")" + name +
+            R"(","section":"authors","count":)" + std::to_string(i + 1) +
+            R"(,"booksHref":"/api/v1/koreader/plugin/catalog/books?author=%E4%BD%9C%E8%80%85%E5%90%8D%E7%A8%B1)"
+            R"(%E4%BD%9C%E8%80%85%E5%90%8D%E7%A8%B1%E4%BD%9C%E8%80%85&sort=title"})";
+  }
+  body += R"(],"page":1,"hasNext":true,"hasPrevious":false,"nextUrl":"/api/v1/koreader/plugin/catalog/sections/authors?page=2"})";
+  ASSERT_GT(body.size(), 12288u);
+  auto session = makeJsonSession({{200, body}});
+  Client::FacetPage page;
+  ASSERT_EQ(session->fetchSectionEntries("authors", 0, page), Client::OK);
+  ASSERT_EQ(page.items.size(), 60u);
+  EXPECT_EQ(page.items[59].title, "作者名稱59");
+  EXPECT_EQ(page.items[59].bookCount, 60u);
+  EXPECT_TRUE(page.hasNext);
+}
+
+TEST_F(BookOrbitCatalogClientTest, FetchSectionEntriesStreamsAllItemsOfAPageOverTheRetainedCap) {
+  // 60 long CJK author names (40 characters: the longest a name-keyed id may be, 128 bytes) exceed
+  // the whole-page cap. Streaming one item at a time keeps all 60 and the real hasNext flag.
+  std::string body = R"({"section":"authors","items":[)";
+  for (int i = 0; i < 60; i++) {
+    std::string name;
+    for (int c = 0; c < 40; c++) name += "龘";
+    name += std::to_string(10 + i);
+    body += std::string(i ? "," : "") + R"({"id":")" + name + R"(","title":")" + name + R"(","section":"authors","count":2})";
+  }
+  body += R"(],"page":1,"hasNext":false})";
+  ASSERT_GT(body.size(), 16384u);
+  FakeKOSyncTransport* fake = nullptr;
+  auto session = makeJsonSession({{200, body}}, &fake);
+  fake->chunkSize = 1000;
+  Client::FacetPage page;
+  ASSERT_EQ(session->fetchSectionEntries("authors", 0, page), Client::OK);
+  ASSERT_EQ(page.items.size(), 60u);
+  EXPECT_EQ(page.items[0].bookCount, 2u);
+  EXPECT_FALSE(page.hasNext);
+}
+
+TEST(BookOrbitJsonKeyDropperTest, RecordsTheLastCompleteTopLevelArrayElement) {
+  static constexpr const char* KEYS[] = {"skip"};
+  std::string out;
+  BookOrbitJsonKeyDropper dropper(KEYS, 1, out, 38);
+  const std::string in = R"({"items":[{"a":[1,2]},{"b":{"c":3}},{"d":"0123456789"}],"hasNext":true})";
+  dropper.feed(reinterpret_cast<const uint8_t*>(in.data()), in.size());
+  ASSERT_TRUE(dropper.truncated());
+  EXPECT_EQ(out.substr(0, dropper.lastTopLevelElementEnd()), R"({"items":[{"a":[1,2]},{"b":{"c":3}})");
+}
+
+TEST_F(BookOrbitCatalogClientTest, FetchSectionEntriesFiltersSeriesByTheirNumericSeriesId) {
+  auto session = makeJsonSession({{200, R"({"section":"series","items":[)"
+                                        R"({"id":"series:42","title":"Dune","section":"series","count":6,"seriesId":42},)"
+                                        R"({"id":"a1","title":"Plain","count":1}],"hasNext":false})"}});
+  Client::FacetPage page;
+  ASSERT_EQ(session->fetchSectionEntries("series", 0, page), Client::OK);
+  ASSERT_EQ(page.items.size(), 2u);
+  EXPECT_EQ(page.items[0].id, "42");
+  EXPECT_EQ(page.items[1].id, "a1");
+  EXPECT_FALSE(page.hasNext);
+}
+
+TEST_F(BookOrbitCatalogClientTest, FetchSectionEntriesWithoutHasNextHasNoNextPage) {
+  std::string body = R"({"items":[)";
+  for (int i = 0; i < 20; i++) body += std::string(i ? "," : "") + R"({"id":"c)" + std::to_string(i) + R"(","title":"C"})";
+  body += "]}";
+  auto session = makeJsonSession({{200, body}});
+  Client::FacetPage page;
+  ASSERT_EQ(session->fetchSectionEntries("collections", 0, page), Client::OK);
+  EXPECT_EQ(page.items.size(), 20u);
+  EXPECT_FALSE(page.hasNext);
+}
+
+TEST_F(BookOrbitCatalogClientTest, FetchBooksReportsTotalAndSeriesPosition) {
+  auto session = makeJsonSession({{200, R"({"page":1,"total":57,"size":20,"hasNext":true,"items":[)"
+                                        R"({"id":1,"title":"A","seriesName":"星光","seriesIndex":3,"thumbnailUrl":"/x"},)"
+                                        R"({"id":2,"title":"B","seriesName":"S","seriesIndex":"1b"},)"
+                                        R"({"id":3,"title":"C","seriesName":null,"seriesIndex":null}]})"}});
+  Client::BookQuery query;
+  Client::BookPage page;
+  ASSERT_EQ(session->fetchBooks(query, page), Client::OK);
+  EXPECT_EQ(page.total, 57u);
+  ASSERT_EQ(page.items.size(), 3u);
+  EXPECT_EQ(page.items[0].seriesName, "星光");
+  EXPECT_EQ(page.items[0].seriesIndex, "3");
+  EXPECT_EQ(page.items[1].seriesIndex, "1b");
+  EXPECT_TRUE(page.items[2].seriesName.empty());
+  EXPECT_TRUE(page.items[2].seriesIndex.empty());
 }
 
 TEST_F(BookOrbitCatalogClientTest, FetchSectionEntriesUsesOneBasedWirePagesForFirstAndLaterPages) {
@@ -450,6 +597,38 @@ TEST_F(BookOrbitCatalogClientTest, AnOverLongStringIdIsRejectedNotTruncated) {
   Client::BookPage page;
   ASSERT_EQ(session->fetchBooks({}, page), Client::OK);
   EXPECT_TRUE(page.items.empty()) << "a truncated id could name a different book";
+}
+
+TEST_F(BookOrbitCatalogClientTest, FetchBookDetailSurvivesAServerSizedDescriptionBeforeFiles) {
+  // The server emits description (often several KB) and relatedSections around `files`; the
+  // retained body must still hold the files after streaming in socket-sized pieces.
+  std::string description;
+  for (int i = 0; i < 300; i++) description += "夜色漸深，圖書館的燈一盞一盞亮起。";
+  std::string related = R"([{"id":"author","title":"More","books":[)";
+  for (int i = 0; i < 8; i++) {
+    related += std::string(i ? "," : "") + R"({"id":)" + std::to_string(900 + i) +
+               R"(,"title":"Related Book With A Long Title","authors":["Someone"],"thumbnailUrl":"/api/v1/koreader/plugin/catalog/books/900/thumbnail"})";
+  }
+  related += "]}]";
+  const std::string body = R"({"id":7,"title":"長夜將盡的星光圖書館","authors":["林曉雲"],"seriesId":3,)"
+                           R"("seriesName":"星光圖書館三部曲","seriesIndex":2.5,"progressPercentage":45.2,)"
+                           R"("readStatus":"reading","description":")" +
+                           description + R"(","rating":4,"files":[{"id":70,"format":"epub","sizeBytes":1234,)"
+                                         R"("devicePath":"/books/長夜將盡的星光圖書館.epub"}],"relatedSections":)" +
+                           related + "}";
+  ASSERT_GT(body.size(), 12000u);
+  FakeKOSyncTransport* fake = nullptr;
+  auto session = makeJsonSession({{200, body}}, &fake);
+  fake->chunkSize = 517;
+  Client::BookDetail detail;
+  ASSERT_EQ(session->fetchBookDetail("7", "device-1", detail), Client::OK);
+  EXPECT_EQ(detail.title, "長夜將盡的星光圖書館");
+  ASSERT_EQ(detail.files.size(), 1u);
+  EXPECT_EQ(detail.files[0].id, "70");
+  EXPECT_EQ(detail.rating, 4);
+  EXPECT_EQ(detail.seriesName, "星光圖書館三部曲");
+  EXPECT_EQ(detail.seriesIndex, "2.5");
+  EXPECT_NEAR(detail.progressPercent, 45.2f, 0.01f);
 }
 
 TEST_F(BookOrbitCatalogClientTest, FetchBookDetailParsesNumericIdsAndOnlyAWellFormedFileHash) {
@@ -1145,4 +1324,14 @@ TEST_F(BookOrbitCatalogClientTest, RequestsRejectedBeforeTheGateDoNotRunHeapPrep
   std::vector<Client::Section> sections;
   EXPECT_EQ(session->fetchRootSections(sections), Client::NO_CREDENTIALS);
   EXPECT_EQ(pressure.calls, 0);
+}
+
+TEST_F(BookOrbitCatalogClientTest, FacetCountsDistinguishZeroFromUnreported) {
+  auto session = makeJsonSession({{200, R"({"items":[{"id":1,"title":"No count"},{"id":2,"title":"Empty","count":0}],"hasNext":false})"}});
+  Client::FacetPage page;
+  ASSERT_EQ(session->fetchSectionEntries("collections", 0, page), Client::OK);
+  ASSERT_EQ(page.items.size(), 2u);
+  EXPECT_FALSE(page.items[0].hasBookCount);
+  EXPECT_TRUE(page.items[1].hasBookCount);
+  EXPECT_EQ(page.items[1].bookCount, 0u);
 }

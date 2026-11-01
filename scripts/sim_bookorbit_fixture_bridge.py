@@ -133,6 +133,14 @@ def main() -> int:
         return finish(404, {"error": "fixture: outside /api/v1/koreader"})
     route = path[len(PREFIX):]
     books = {str(b["id"]): b for b in catalog.get("books", [])}
+    if method == "GET" and route.startswith("/plugin/catalog/books/") and faults.get("fail_detail_once"):
+        status = int(faults.pop("fail_detail_once"))
+        return finish(status, {"error": "fixture detail fault"})
+    if route.startswith("/plugin/catalog") and faults.get("catalog_status"):
+        return finish(int(faults["catalog_status"]), {"error": "fixture catalog fault"})
+    if route == "/plugin/catalog/books" and (query.get("page") or ["1"])[0] == str(faults.get("fail_page_once")):
+        faults.pop("fail_page_once")
+        return finish(0)
 
     def file_entry(f):
         fp = fixture / f["file"]

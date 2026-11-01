@@ -240,6 +240,7 @@ def main() -> int:
     ap.add_argument("--flows", choices=["before", "after"], default="after")
     ap.add_argument("--video-driver", default="dummy")
     ap.add_argument("--timeout", type=int, default=120)
+    ap.add_argument("--only", help="comma-separated after-flow names, e.g. search,download")
     ap.add_argument("--keep", help="artifact directory (default: a new temp dir, kept)")
     args = ap.parse_args()
     home.zh_tw_fonts()
@@ -289,7 +290,134 @@ def main() -> int:
 
 
 def after_suite(args, fx, state, flog, failures):
-    raise SystemExit("after flows are defined with the redesigned UI")
+    shots = []
+    active = True
+
+    def need(_failures, cond, msg):
+        if active:
+            home.need(failures, cond, msg)
+
+    def down(flow, n):
+        for _ in range(n):
+            flow.press("DOWN", 350)
+        return flow
+
+    def all_books():
+        return down(Flow().press("ENTER").wait(1200), 3).press("ENTER").wait(800)
+
+    def run(name, flow, faults=None):
+        nonlocal active
+        active = not args.only or name in args.only.split(",")
+        if not active:
+            return "", []
+        log, reqs, images = run_flow(args, name, fx, state, flog, flow, failures, faults)
+        shots.extend(images)
+        routes = catalog_requests(reqs)
+        for method, route, query, status in routes:
+            print(f"  [{name}] {method} {route} {query} -> {status}")
+        need(failures, all(r["path"].startswith("/api/v1/koreader/") for r in reqs),
+                  f"{name}: request outside BookOrbit")
+        return log, routes
+
+    def book_gets(routes):
+        return [(query, status) for method, route, query, status in routes
+                if method == "GET" and route == "/plugin/catalog/books"]
+
+    # Root, long mixed-script rows, automatic paging, and Back = parent (not previous page).
+    f = Flow().press("ENTER").wait(1200).shot("after-01-root.bmp", "localized root with visible search and local books")
+    down(f, 3).press("ENTER").wait(800).shot("after-02-books.bmp", "title / author / status, list context and position")
+    down(f, 21).wait(800).shot("after-03-page2.bmp", "page 2 reached by crossing the list edge")
+    f.press("UP").wait(800).shot("after-04-page1-tail.bmp", "previous page restores its last row")
+    f.press("BACK").wait(800).shot("after-05-back-root.bmp", "Back returns to the root with All books selected")
+    f.press("ENTER").wait(800)
+    _, routes = run("browse", f)
+    need(failures, [q.get("page") for q, status in book_gets(routes)] == ["1", "2", "1", "1"],
+              "browse: page traversal or parent Back changed")
+
+    # Select sort and filter explicitly, make one status write, then return to the same query.
+    f = all_books().press("ENTER").shot("after-06-options.bmp", "explicit sort / status choices with current markers")
+    down(f, 1).press("ENTER").wait(700).shot("after-07-author-sort.bmp", "author sort with long CJK and mixed titles")
+    f.press("ENTER")
+    down(f, 8).press("ENTER").wait(700).shot("after-08-filter.bmp", "reading filter retained on the list")
+    f.press("DOWN").press("ENTER").wait(700).shot("after-09-detail.bmp", "detail with title, series, status, EPUB size and actions")
+    f.press("DOWN").press("ENTER").shot("after-10-status-choices.bmp", "one explicit status selection, no cycling writes")
+    # Current book is reading / on_hold; either way the first UP presses clamp at Unread.
+    for _ in range(5): f.press("UP", 300)
+    down(f, 4).press("ENTER").wait(700).press("BACK").wait(700).shot("after-11-edited-filter.bmp", "edited book removed from reading filter")
+    _, routes = run("choices", f)
+    gets = book_gets(routes)
+    need(failures, bool(gets) and gets[-1][0].get("sort") == "author" and gets[-1][0].get("readStatus") == "reading",
+              "choices: detail Back lost sort or filter")
+    writes = [r for r in routes if r[0] == "PUT"]
+    need(failures, len(writes) == 1 and writes[0][1].endswith("/read-status") and writes[0][3] == 200,
+              "choices: status choice must issue exactly one successful write")
+    need(failures, list((json.loads(state.read_text()) if state.exists() else {}).get("statuses", {}).values()) == ["read"],
+              "choices: selected Finished status did not persist")
+
+    # A request failure at the page edge keeps page 1, its selection and Back stack intact.
+    f = all_books()
+    down(f, 21).wait(700).shot("after-12-page-error.bmp", "page request failed: loaded rows and selection remain")
+    f.press("UP", 350).press("DOWN", 350).press("DOWN").wait(700).shot("after-13-page-retry.bmp", "moving across the same edge retries page 2")
+    _, routes = run("page-failure", f, {"fail_page_once": 2})
+    need(failures, [(q.get("page"), status) for q, status in book_gets(routes)] ==
+              [("1", 200), ("2", 0), ("2", 200)], "page-failure: failed paging lost position or could not retry")
+
+    f = down(Flow().press("ENTER").wait(1200), 6).press("ENTER").wait(700).shot("after-14-series.bmp", "series facets with counts")
+    f.press("ENTER").wait(700).shot("after-15-series-books.bmp", "series breadcrumb and filtered books")
+    _, routes = run("series", f)
+    need(failures, any(q.get("seriesId", "").isdigit() and status == 200 for q, status in book_gets(routes)),
+              "series: drill-in must use the server numeric seriesId")
+
+    f = down(Flow().press("ENTER").wait(1200), 8).press("ENTER").wait(700).shot("after-16-collections.bmp", "countless facets do not claim 0 books")
+    f.press("DOWN").press("ENTER").wait(700).shot("after-17-empty.bmp", "contextual empty list keeps options available")
+    run("empty", f)
+
+    f = all_books().press("DOWN").press("ENTER").wait(700).shot("after-27-detail-error.bmp", "detail request rejection with Retry")
+    f.press("ENTER").wait(700).shot("after-28-detail-retry.bmp", "Retry requests the same book detail")
+    f.press("BACK").wait(700)
+    _, routes = run("detail-failure", f, {"fail_detail_once": 400})
+    details = [r for r in routes if r[0] == "GET" and r[1].startswith("/plugin/catalog/books/")]
+    need(failures, len(details) == 2 and [r[3] for r in details] == [400, 200] and details[0][1] == details[1][1],
+         "detail-failure: Retry must repeat the same detail request")
+
+    # QWERTY, physical buttons only: type 1, then bottom-row OK. No Chinese input is implied.
+    f = Flow().press("ENTER").wait(1200).press("ENTER").wait(700).shot("after-18-search-keyboard.bmp", "search via the visible root row")
+    f.press("ENTER")
+    down(f, 4)
+    for _ in range(2): f.press("RIGHT", 350)
+    f.press("ENTER").wait(700).shot("after-19-search-results.bmp", "search results retain the query and an empty-state explanation")
+    _, routes = run("search", f)
+    need(failures, any(q.get("q") == "1" and status == 200 for q, status in book_gets(routes)),
+              "search: keyboard submit did not issue the expected search")
+
+    f = all_books().press("ENTER")
+    down(f, 1).press("ENTER").press("ENTER")
+    down(f, 8).press("ENTER").press("ENTER")
+    down(f, 10).press("ENTER").wait(500).press("ENTER")
+    down(f, 4)
+    for _ in range(2): f.press("RIGHT", 350)
+    f.press("ENTER").wait(700).shot("after-25-scoped-search.bmp", "search preserves author sort and reading filter")
+    f.press("BACK").wait(700).shot("after-26-search-back.bmp", "Back restores the parent query and selection")
+    _, routes = run("scoped-search", f)
+    gets = book_gets(routes)
+    need(failures, any(q.get("q") == "1" and q.get("sort") == "author" and
+                       q.get("readStatus") == "reading" for q, status in gets), "scoped-search: lost list filters")
+    need(failures, bool(gets) and gets[-1][0].get("sort") == "author" and
+         gets[-1][0].get("readStatus") == "reading" and "q" not in gets[-1][0], "scoped-search: Back lost parent query")
+
+    # Download/index/local-row state, then explicit rating (one write) and Back restoration.
+    f = all_books().press("DOWN").press("ENTER").wait(700).press("ENTER").wait(1800).shot("after-20-downloaded.bmp", "download complete, Open book focused")
+    down(f, 3).press("ENTER")
+    down(f, 5).press("ENTER").wait(700).press("BACK").wait(700).shot("after-21-local-row.bmp", "downloaded marker after returning to the list")
+    _, routes = run("download", f)
+    need(failures, any(r[1].endswith("/download") and r[3] == 200 for r in routes), "download: no successful file transfer")
+    need(failures, len([r for r in routes if r[0] == "PUT" and r[1].endswith("/rating")]) == 1,
+              "download: rating selection did not issue exactly one write")
+
+    run("offline", Flow().press("ENTER").wait(1400).shot("after-22-offline.bmp", "offline library retains local entry"), {"offline": True})
+    run("error", Flow().press("ENTER").wait(1400).shot("after-23-error.bmp", "localized server rejection with Retry"), {"catalog_status": 400})
+    run("loading", Flow().press("ENTER", 350).shot("after-24-loading.bmp", "loading retains library context").wait(2200), {"delay_ms": 1500})
+    return shots
 
 
 if __name__ == "__main__":

@@ -72,7 +72,6 @@ EpubReaderMenuActivity::TabMenuItems EpubReaderMenuActivity::buildMenuItems(bool
   mainItems.push_back({MenuAction::SCREENSHOT, StrId::STR_SCREENSHOT_BUTTON});
   mainItems.push_back({MenuAction::DISPLAY_QR, StrId::STR_DISPLAY_QR});
   mainItems.push_back({MenuAction::GO_HOME, StrId::STR_GO_HOME_BUTTON});
-  mainItems.push_back({MenuAction::SYNC, StrId::STR_SYNC_PROGRESS});
   mainItems.push_back({MenuAction::DELETE_CACHE, StrId::STR_DELETE_CACHE});
   mainItems.push_back(
       {MenuAction::TOGGLE_FINISHED, isFinished ? StrId::STR_MARK_UNFINISHED : StrId::STR_MARK_FINISHED});

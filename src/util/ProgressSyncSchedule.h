@@ -46,11 +46,12 @@ constexpr uint64_t intervalMicros(uint8_t interval) {
   }
 }
 
-constexpr uint8_t enabledProviders(bool hasSavedWifi, bool hasTargetEpub, bool hasKOSyncCredentials,
-                                   bool kosyncAutoSyncEnabled, bool hasBookOrbitCredentials) {
+// Provider bits match ProgressSyncRetry::Provider. BookOrbit (2) is the only provider this product
+// schedules; bit 1 is the retired independent KOSync provider, never enabled, so a retry state an
+// older build left behind for it is pruned instead of keeping the timer armed.
+constexpr uint8_t enabledProviders(bool hasSavedWifi, bool hasTargetEpub, bool hasBookOrbitCredentials) {
   if (!hasSavedWifi || !hasTargetEpub) return 0;
-  return static_cast<uint8_t>((hasKOSyncCredentials && kosyncAutoSyncEnabled ? 1 : 0) |
-                              (hasBookOrbitCredentials ? 2 : 0));
+  return hasBookOrbitCredentials ? 2 : 0;
 }
 
 constexpr uint64_t sleepDelayMicros(uint8_t interval, uint8_t providers) {

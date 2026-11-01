@@ -29,12 +29,15 @@ using Client = BookOrbitCatalogClient;
 Client::BookPage samplePage() {
   Client::BookPage page;
   page.hasNext = true;
+  page.total = 46;
   Client::BookSummary a;
   a.id = "101";
   a.title = "沙丘";
   a.authors = "法蘭克·赫伯特";
   a.progressPercent = 42.5f;
   a.readStatus = "reading";
+  a.seriesName = "星光圖書館";
+  a.seriesIndex = "2.5";
   Client::BookSummary b;
   b.id = "102";
   b.title = "Second";
@@ -66,6 +69,9 @@ TEST_F(CatalogCacheTest, RootAndBookPagesRoundTrip) {
   ASSERT_EQ(page.items.size(), 2u);
   EXPECT_TRUE(page.hasNext);
   EXPECT_EQ(page.items[0].id, "101");
+  EXPECT_EQ(page.total, 46u);
+  EXPECT_EQ(page.items[0].seriesName, "星光圖書館");
+  EXPECT_EQ(page.items[0].seriesIndex, "2.5");
   EXPECT_NEAR(page.items[0].progressPercent, 42.5f, 0.01f);
   EXPECT_LT(page.items[1].progressPercent, 0.0f);
 }
@@ -170,3 +176,32 @@ TEST_F(CatalogCacheTest, NoCredentialsMeansNoCache) {
 }
 
 }  // namespace
+
+TEST_F(CatalogCacheTest, ExistingVersionOneBookPagesStillOpenOffline) {
+  Cache cache(ownerOf("alice"), &digest2);
+  Client::BookPage original;
+  Client::BookSummary book;
+  book.id = "101";
+  book.title = "Legacy local catalog";
+  original.items.push_back(book);
+  Client::BookQuery query;
+  ASSERT_TRUE(cache.saveBooks(query, original, 123u));
+  for (auto& [path, bytes] : testStorage().files) {
+    if (path.find(".bin") == std::string::npos) continue;
+    constexpr size_t headerBytes = 4 + 1 + BookOrbitOwnerId::BYTES + 1 + 4 + 1 + 2;
+    bytes[4] = 1;
+    bytes.erase(bytes.begin() + headerBytes, bytes.begin() + headerBytes + 4);  // v2 total
+    bytes.erase(bytes.end() - 3, bytes.end() - 1);  // v2 empty seriesName/index
+    uint8_t sum = 0x69;
+    for (size_t i = 0; i + 1 < bytes.size(); ++i)
+      sum = static_cast<uint8_t>((sum << 1 | sum >> 7) ^ bytes[i]);
+    bytes.back() = sum;
+  }
+  Client::BookPage loaded;
+  BookOrbitCatalogCache::Meta meta;
+  ASSERT_TRUE(cache.loadBooks(query, loaded, meta));
+  ASSERT_EQ(loaded.items.size(), 1u);
+  EXPECT_EQ(loaded.items[0].title, book.title);
+  EXPECT_TRUE(loaded.items[0].seriesName.empty());
+  EXPECT_EQ(loaded.total, 0u);
+}

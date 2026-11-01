@@ -31,7 +31,8 @@
  */
 class BookOrbitCatalogBrowserActivity final : public Activity {
  public:
-  enum class BrowserState { CHECK_WIFI, WIFI_SELECTION, LOADING, BROWSING, DETAIL, DOWNLOADING, ERROR, SEARCH_INPUT };
+  enum class BrowserState { CHECK_WIFI, WIFI_SELECTION, LOADING, BROWSING, DETAIL, DOWNLOADING, ERROR, SEARCH_INPUT,
+                            OPTIONS, READ_STATUS, RATING };
   // Settings: the original BookOrbit settings action (Back returns there). Home / HomeSearch: the
   // BookOrbit Home's library entry points (Back returns to Home's 書庫 tile).
   enum class EntryMode { Settings, Home, HomeSearch };
@@ -57,6 +58,7 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
     BookOrbitCatalogClient::BookQuery query;
     int page = 0;
     int selectorIndex = 0;
+    std::string location;
   };
 
   // One selectable row of the DETAIL screen, built by buildDetailRows() from the book's state.
@@ -82,6 +84,15 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   int currentPage = 0;
   bool currentPageHasNext = false;
   int selectorIndex = 0;
+  uint32_t totalBooks = 0;
+  uint32_t localBookCount = 0;
+  std::string location;
+  std::string listNotice;
+  bool paging = false;
+  bool detailChanged = false;
+  bool retryDetail = false;
+  BookOrbitCatalogClient::BookSummary retryBook;
+  int choiceIndex = 0;
   bool consumeConfirm = false;
   bool consumeBack = false;
   bool backReleasePending = true;  // a Back still held from the previous activity is not ours
@@ -113,10 +124,13 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
 
   size_t itemCount() const;
   size_t displayCount() const;
-  bool isPrevPageRow(size_t displayIndex) const;
-  bool isNextPageRow(size_t displayIndex) const;
   size_t toItemIndex(size_t displayIndex) const;
   int listPageItems() const;
+  int listTop() const;
+  int rowHeight() const;
+  void moveSelection(int delta);
+  void applyChoice();
+  void returnFromDetail();
 
   void checkAndConnectWifi();
   void launchWifiSelection();
@@ -141,8 +155,8 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   void goBackOrHome();
   void downloadFile(int fileIndex);
   void openLocalBook(const std::string& path);
-  void cycleReadStatus();
-  void cycleRating();
+  void setReadStatus(int index);
+  void setRating(int index);
   void launchSearch();
   void performSearch(const std::string& query);
   void reportSessionError(BookOrbitCatalogClient::Error error);

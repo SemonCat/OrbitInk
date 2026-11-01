@@ -278,9 +278,29 @@ def scenario_corrupt_wifi(s: Scenario):
         s.need(r[3]["store"] == "ok" and r[3]["bo"] == "ok", f"recovered wake {r[3]}")
 
 
+def scenario_legacy_only(s: Scenario):
+    """S9: legacy KOSync credentials never enable product traffic or a periodic timer."""
+    (s.sd / "bookorbit.json").unlink()
+    s.write("koreader.json", {"username": "fixture", "password": "fixture-placeholder",
+                              "serverUrl": "https://legacy.fixture.invalid", "autoSync": True})
+    s.run(max_wakes=2)
+    s.need(not s.requests(), "legacy-only credentials must not issue any request")
+    s.need(not any(t["action"] == "timer" for t in s.traces()), "legacy-only account armed a periodic timer")
+
+
+def scenario_corrupt_legacy(s: Scenario):
+    """S10: unreadable retired koreader.json cannot break BookOrbit's overnight cadence."""
+    (s.sd / "koreader.json").write_text("{ invalid retired store")
+    s.run(max_wakes=3)
+    s.need([t["action"] for t in s.traces()] == ["timer"] * 3 + ["budget-spent"],
+           f"corrupt retired store interrupted timer chain: {s.traces()}")
+    s.need(any(r.get("bo") == "ok" for r in s.receipts() if r.get("t") == "timer"),
+           "BookOrbit did not synchronize during timer wakes")
+
+
 SCENARIOS = {
     "S1": scenario_cadence, "S2": scenario_retry, "S3": scenario_low_memory, "S4": scenario_off,
-    "S5": scenario_no_wifi, "S6": scenario_24h, "S7": scenario_corrupt_state, "S8": scenario_corrupt_wifi,
+    "S5": scenario_no_wifi, "S6": scenario_24h, "S7": scenario_corrupt_state, "S8": scenario_corrupt_wifi, "S9": scenario_legacy_only, "S10": scenario_corrupt_legacy,
 }
 
 

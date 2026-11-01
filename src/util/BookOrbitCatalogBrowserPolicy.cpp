@@ -7,6 +7,32 @@
 
 namespace BookOrbitCatalogBrowserPolicy {
 
+ReadState readState(const std::string& status) {
+  if (status.empty() || status == "unread") return ReadState::Unread;
+  if (status == "want_to_read") return ReadState::WantToRead;
+  if (status == "reading" || status == "rereading") return ReadState::Reading;
+  if (status == "on_hold") return ReadState::OnHold;
+  if (status == "read" || status == "skimmed") return ReadState::Finished;
+  if (status == "abandoned") return ReadState::Abandoned;
+  return ReadState::Other;
+}
+
+bool matchesReadFilter(const std::string& status, const std::string& filter) {
+  if (filter.empty()) return true;
+  const auto value = readState(status);
+  if (filter == "unread")
+    return value == ReadState::Unread || value == ReadState::WantToRead || value == ReadState::Other;
+  if (filter == "reading") return value == ReadState::Reading || value == ReadState::OnHold;
+  if (filter == "finished") return value == ReadState::Finished || value == ReadState::Abandoned;
+  return false;
+}
+
+ListMove moveInList(int page, int index, int count, bool hasNext, int delta) {
+  if (index + delta < 0) return page > 0 ? ListMove{page - 1, -1, true} : ListMove{page, 0, false};
+  if (index + delta >= count && hasNext) return {page + 1, 0, true};
+  return {page, std::max(0, std::min(index + delta, count - 1)), false};
+}
+
 namespace {
 
 constexpr size_t MAX_FILENAME_STEM_BYTES = 100;

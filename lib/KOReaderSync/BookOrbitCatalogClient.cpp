@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <string>
 
+#include "BookOrbitJsonKeyDropper.h"
 #include "DefaultKOSyncTransport.h"
 #include "KOSyncRequestHelpers.h"
 
@@ -139,10 +140,32 @@ std::string encodeQueryValue(const std::string& value) {
 // mid-item; a server that pads far beyond this is treated as misbehaving and its excess is simply
 // never retained (the callback below stops appending once the cap is hit, it does not abort the
 // transfer -- the HTTP request itself still completes normally).
+// These caps bound what is RETAINED after BookOrbitJsonKeyDropper has replaced the values of the
+// fields below (never read by this client) with null as the bytes arrive.
 constexpr size_t MAX_ROOT_BODY = 2048;
 constexpr size_t MAX_BOOKS_PAGE_BODY = 16384;
-constexpr size_t MAX_FACET_PAGE_BODY = 8192;
-constexpr size_t MAX_BOOK_DETAIL_BODY = 4096;
+constexpr size_t MAX_FACET_PAGE_BODY = 16384;  // One streamed facet item plus envelope
+constexpr size_t MAX_BOOK_DETAIL_BODY = 6144;
+
+// Server fields this client never reads, dropped while streaming (packages/types/src/koreader.ts).
+// The detail's description and related-book sections are the ones that matter: they can run to
+// several KB and description precedes `files`, which a plain byte cap would cut off.
+constexpr const char* ROOT_DROPPED_KEYS[] = {"href", "booksHref", "icon", "subtitle"};
+constexpr const char* BOOKS_DROPPED_KEYS[] = {"thumbnailUrl", "detailUrl", "formats",     "hasCover",
+                                              "addedAt",      "updatedAt", "nextUrl",     "previousUrl",
+                                              "lastReadAt",   "hasPrevious", "seriesSummary"};
+constexpr const char* FACET_DROPPED_KEYS[] = {"href", "booksHref", "icon", "subtitle", "nextUrl", "previousUrl", "query"};
+constexpr const char* DETAIL_DROPPED_KEYS[] = {
+    "description", "relatedSections", "collections", "genres",      "tags",        "thumbnailUrl",
+    "detailUrl",   "downloadUrl",     "devicePath",  "subtitle",    "publisher",   "publishedDate",
+    "isbn10",      "isbn13",          "addedAt",     "updatedAt",   "lastReadAt",  "formats",
+    "progress",    "libraryName",     "language",    "durationSeconds"};
+
+template <size_t N>
+BookOrbitJsonKeyDropper makeDropper(const char* const (&keys)[N], std::string& body, size_t cap) {
+  return BookOrbitJsonKeyDropper(keys, N, body, cap);
+}
+
 
 // Caps applied to server-supplied display strings so one pathological field (an author name
 // measured in kilobytes) can't blow past this device's tiny per-item RAM budget when a page of
@@ -192,6 +215,19 @@ std::string jsonId(JsonVariantConst value) {
   if (value.is<int64_t>()) return std::to_string(value.as<int64_t>());
   return {};
 }
+
+// Display text for the server's seriesIndex (a number such as 2 or 2.5, or a string).
+std::string seriesIndexText(JsonVariantConst value) {
+  if (value.is<const char*>()) return boundedString(value.as<const char*>(), 16);
+  if (value.is<int64_t>()) return std::to_string(value.as<int64_t>());
+  if (value.is<float>()) {
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%g", static_cast<double>(value.as<float>()));
+    return buf;
+  }
+  return {};
+}
+constexpr size_t MAX_SERIES_CHARS = 120;
 
 // Joins a JSON string array ("authors": ["A", "B"]) into one bounded, comma-joined display
 // string, stopping once the shared cap is reached rather than growing without limit. Each
@@ -306,11 +342,11 @@ BookOrbitCatalogClient::Error BookOrbitCatalogClient::Session::fetchRootSections
   applyBookOrbitAuthHeaders(*transport_);
 
   std::string body;
+  auto dropper = makeDropper(ROOT_DROPPED_KEYS, body, MAX_ROOT_BODY);
   const int httpCode = transport_->sendRequest(
       "GET", nullptr, 0,
-      [&body](const uint8_t* data, size_t len) {
-        if (body.size() < MAX_ROOT_BODY)
-          body.append(reinterpret_cast<const char*>(data), std::min(len, MAX_ROOT_BODY - body.size()));
+      [&dropper](const uint8_t* data, size_t len) {
+        dropper.feed(data, len);
         return true;
       },
       shouldAbort);
@@ -372,11 +408,39 @@ BookOrbitCatalogClient::Error BookOrbitCatalogClient::Session::fetchBooks(const 
   applyBookOrbitAuthHeaders(*transport_);
 
   std::string body;
+  auto dropper = makeDropper(BOOKS_DROPPED_KEYS, body, MAX_BOOKS_PAGE_BODY);
+  bool invalidItem = false;
+  dropper.setItemSink([&](const char* data, size_t len) {
+    if (out.items.size() >= static_cast<size_t>(PAGE_SIZE)) return;
+    JsonDocument item;
+    if (deserializeJson(item, data, len) || !item.is<JsonObjectConst>()) { invalidItem = true; return; }
+    const auto entry = item.as<JsonObjectConst>();
+    const std::string id = jsonId(entry["id"]);
+    const char* title = entry["title"] | static_cast<const char*>(nullptr);
+    if (id.empty() || !title) return;
+    BookSummary book;
+    book.id = id;
+    if (entry["progressPercentage"].is<float>()) {
+      const float pct = entry["progressPercentage"].as<float>();
+      if (pct >= 0.0f && pct <= 100.0f) book.progressPercent = pct;
+    }
+    if (const char* rs = entry["readStatus"] | static_cast<const char*>(nullptr)) {
+      book.readStatus = boundedString(rs, MAX_STATUS_CHARS);
+    }
+    book.title = boundedString(title, MAX_TITLE_CHARS);
+    if (entry["authors"].is<JsonArrayConst>()) {
+      book.authors = joinBoundedList(entry["authors"].as<JsonArrayConst>(), MAX_AUTHORS_CHARS);
+    }
+    if (const char* series = entry["seriesName"] | static_cast<const char*>(nullptr)) {
+      book.seriesName = boundedString(series, MAX_SERIES_CHARS);
+      book.seriesIndex = seriesIndexText(entry["seriesIndex"]);
+    }
+    out.items.push_back(std::move(book));
+  });
   const int httpCode = transport_->sendRequest(
       "GET", nullptr, 0,
-      [&body](const uint8_t* data, size_t len) {
-        if (body.size() < MAX_BOOKS_PAGE_BODY)
-          body.append(reinterpret_cast<const char*>(data), std::min(len, MAX_BOOKS_PAGE_BODY - body.size()));
+      [&dropper](const uint8_t* data, size_t len) {
+        dropper.feed(data, len);
         return true;
       },
       shouldAbort);
@@ -386,32 +450,14 @@ BookOrbitCatalogClient::Error BookOrbitCatalogClient::Session::fetchBooks(const 
   if (result == OK) {
     JsonDocument doc;
     const DeserializationError error = deserializeJson(doc, body.c_str());
-    if (error || !doc["items"].is<JsonArrayConst>()) {
+    if (error || invalidItem || dropper.truncated() || !doc["items"].is<JsonArrayConst>()) {
       LOG_DBG("BOCatalog", "Books page: unparseable or unexpected shape (%s)", error.c_str());
       result = JSON_ERROR;
     } else {
-      for (JsonObjectConst entry : doc["items"].as<JsonArrayConst>()) {
-        const std::string id = jsonId(entry["id"]);
-        const char* title = entry["title"] | static_cast<const char*>(nullptr);
-        if (id.empty() || !title) continue;
-        BookSummary book;
-        book.id = id;
-        if (entry["progressPercentage"].is<float>()) {
-          const float pct = entry["progressPercentage"].as<float>();
-          if (pct >= 0.0f && pct <= 100.0f) book.progressPercent = pct;
-        }
-        if (const char* rs = entry["readStatus"] | static_cast<const char*>(nullptr)) {
-          book.readStatus = boundedString(rs, MAX_STATUS_CHARS);
-        }
-        book.title = boundedString(title, MAX_TITLE_CHARS);
-        if (entry["authors"].is<JsonArrayConst>()) {
-          book.authors = joinBoundedList(entry["authors"].as<JsonArrayConst>(), MAX_AUTHORS_CHARS);
-        }
-        out.items.push_back(std::move(book));
-        if (out.items.size() >= static_cast<size_t>(PAGE_SIZE)) break;  // never trust the server past our own page size
-      }
+
       // Prefer an explicit total/page/size accounting when present; otherwise infer from whether
       // this page came back full (a partial last page cannot have a next page).
+      if (doc["total"].is<uint32_t>()) out.total = doc["total"].as<uint32_t>();
       if (doc["total"].is<uint32_t>() && doc["size"].is<uint32_t>()) {
         const uint32_t total = doc["total"].as<uint32_t>();
         const uint32_t size = doc["size"].as<uint32_t>();
@@ -420,9 +466,11 @@ BookOrbitCatalogClient::Error BookOrbitCatalogClient::Session::fetchBooks(const 
       } else {
         out.hasNext = out.items.size() >= static_cast<size_t>(PAGE_SIZE);
       }
+
     }
   }
 
+  if (result != OK) out = BookPage{};
   logOutcome("GET /plugin/catalog/books", httpCode, result);
   return result;
 }
@@ -452,11 +500,28 @@ BookOrbitCatalogClient::Error BookOrbitCatalogClient::Session::fetchSectionEntri
   applyBookOrbitAuthHeaders(*transport_);
 
   std::string body;
+  auto dropper = makeDropper(FACET_DROPPED_KEYS, body, MAX_FACET_PAGE_BODY);
+  bool invalidItem = false;
+  dropper.setItemSink([&](const char* data, size_t len) {
+    if (out.items.size() >= static_cast<size_t>(MAX_FACET_PAGE_ITEMS)) return;
+    JsonDocument item;
+    if (deserializeJson(item, data, len) || !item.is<JsonObjectConst>()) { invalidItem = true; return; }
+    const auto entry = item.as<JsonObjectConst>();
+    // A series entry's id ("series:<n>") is not a valid seriesId filter; its numeric seriesId is.
+    const std::string id = entry["seriesId"].is<uint64_t>() ? jsonId(entry["seriesId"]) : jsonId(entry["id"]);
+    const char* title = entry["title"] | static_cast<const char*>(nullptr);
+    if (id.empty() || !title) return;
+    FacetEntry facet;
+    facet.id = id;
+    facet.title = boundedString(title, MAX_TITLE_CHARS);
+    facet.bookCount = entry["count"] | 0;
+    facet.hasBookCount = entry["count"].is<uint32_t>();
+    out.items.push_back(std::move(facet));
+  });
   const int httpCode = transport_->sendRequest(
       "GET", nullptr, 0,
-      [&body](const uint8_t* data, size_t len) {
-        if (body.size() < MAX_FACET_PAGE_BODY)
-          body.append(reinterpret_cast<const char*>(data), std::min(len, MAX_FACET_PAGE_BODY - body.size()));
+      [&dropper](const uint8_t* data, size_t len) {
+        dropper.feed(data, len);
         return true;
       },
       shouldAbort);
@@ -466,26 +531,18 @@ BookOrbitCatalogClient::Error BookOrbitCatalogClient::Session::fetchSectionEntri
   if (result == OK) {
     JsonDocument doc;
     const DeserializationError error = deserializeJson(doc, body.c_str());
-    if (error || !doc["items"].is<JsonArrayConst>()) {
+    if (error || invalidItem || dropper.truncated() || !doc["items"].is<JsonArrayConst>()) {
       LOG_DBG("BOCatalog", "Section entries: unparseable or unexpected shape (%s)", error.c_str());
       result = JSON_ERROR;
     } else {
-      for (JsonObjectConst entry : doc["items"].as<JsonArrayConst>()) {
-        const std::string id = jsonId(entry["id"]);
-        const char* title = entry["title"] | static_cast<const char*>(nullptr);
-        if (id.empty() || !title) continue;
-        FacetEntry facet;
-        facet.id = id;
-        facet.title = boundedString(title, MAX_TITLE_CHARS);
-        facet.bookCount = entry["count"] | 0;
-        out.items.push_back(std::move(facet));
-        if (out.items.size() >= static_cast<size_t>(PAGE_SIZE)) break;
-      }
-      out.hasNext =
-          doc["hasNext"].is<bool>() ? doc["hasNext"].as<bool>() : out.items.size() >= static_cast<size_t>(PAGE_SIZE);
+
+      // Only the server knows its facet page size, so without hasNext there is no next page.
+      out.hasNext = doc["hasNext"].is<bool>() && doc["hasNext"].as<bool>();
+
     }
   }
 
+  if (result != OK) out = FacetPage{};
   logOutcome("GET /plugin/catalog/sections/:id", httpCode, result);
   return result;
 }
@@ -517,11 +574,11 @@ BookOrbitCatalogClient::Error BookOrbitCatalogClient::Session::fetchBookDetail(c
   applyBookOrbitAuthHeaders(*transport_);
 
   std::string body;
+  auto dropper = makeDropper(DETAIL_DROPPED_KEYS, body, MAX_BOOK_DETAIL_BODY);
   const int httpCode = transport_->sendRequest(
       "GET", nullptr, 0,
-      [&body](const uint8_t* data, size_t len) {
-        if (body.size() < MAX_BOOK_DETAIL_BODY)
-          body.append(reinterpret_cast<const char*>(data), std::min(len, MAX_BOOK_DETAIL_BODY - body.size()));
+      [&dropper](const uint8_t* data, size_t len) {
+        dropper.feed(data, len);
         return true;
       },
       shouldAbort);
@@ -541,6 +598,14 @@ BookOrbitCatalogClient::Error BookOrbitCatalogClient::Session::fetchBookDetail(c
       out.title = boundedString(title, MAX_TITLE_CHARS);
       if (doc["authors"].is<JsonArrayConst>()) {
         out.authors = joinBoundedList(doc["authors"].as<JsonArrayConst>(), MAX_AUTHORS_CHARS);
+      }
+      if (const char* series = doc["seriesName"] | static_cast<const char*>(nullptr)) {
+        out.seriesName = boundedString(series, MAX_SERIES_CHARS);
+        out.seriesIndex = seriesIndexText(doc["seriesIndex"]);
+      }
+      if (doc["progressPercentage"].is<float>()) {
+        const float pct = doc["progressPercentage"].as<float>();
+        if (pct >= 0.0f && pct <= 100.0f) out.progressPercent = pct;
       }
       if (doc["files"].is<JsonArrayConst>()) {
         for (JsonObjectConst fileEntry : doc["files"].as<JsonArrayConst>()) {

@@ -2,7 +2,6 @@
 
 #include <BookOrbitCredentialStore.h>
 #include <FsHelpers.h>
-#include <KOReaderCredentialStore.h>
 #include <Logging.h>
 #include <WifiCredentialStore.h>
 
@@ -36,7 +35,7 @@ uint64_t sleepDelayMicros() {
   const auto before = APP_STATE.progressSyncRetry;
   const uint8_t enabled = ProgressSyncSchedule::enabledProviders(
       WIFI_STORE.getCredentialCount() != 0, FsHelpers::hasEpubExtension(APP_STATE.openEpubPath),
-      KOREADER_STORE.hasCredentials(), KOREADER_STORE.getAutoSyncEnabled(), BOOKORBIT_STORE.hasCredentials());
+      BOOKORBIT_STORE.hasCredentials());
   APP_STATE.progressSyncRetry.prune(APP_STATE.openEpubPath, enabled);
   persistIfChanged(before);
   return ProgressSyncSchedule::sleepDelayMicros(SETTINGS.periodicSyncInterval, enabled);

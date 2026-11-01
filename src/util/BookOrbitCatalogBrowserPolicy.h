@@ -10,6 +10,17 @@ namespace BookOrbitCatalogBrowserPolicy {
 
 constexpr size_t NAVIGATION_HISTORY_LIMIT = 8;
 
+enum class ReadState { Unread, WantToRead, Reading, OnHold, Finished, Abandoned, Other };
+ReadState readState(const std::string& status);
+bool matchesReadFilter(const std::string& status, const std::string& filter);
+
+struct ListMove {
+  int page;
+  int index;
+  bool fetch;
+};
+ListMove moveInList(int page, int index, int count, bool hasNext, int delta);
+
 std::string downloadPath(const std::string& authors, const std::string& title, const std::string& fileId,
                          size_t fileChoiceCount);
 

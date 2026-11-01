@@ -14,8 +14,6 @@
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
 #include "Epub.h"
-#include "KOReaderCredentialStore.h"
-#include "KOReaderDocumentId.h"
 #include "ProgressMapper.h"
 #include "ProgressSyncNetwork.h"
 #include "activities/reader/EpubReaderUtils.h"
@@ -88,10 +86,6 @@ bool persistClear(bool disableQuickResume = false, const DeferredProgress* appli
 }
 
 std::string expectedDocument(const DeferredProgress& deferred) {
-  if (deferred.provider == 1) {
-    return KOReaderDocumentId::calculateForProgress(
-        deferred.path, KOREADER_STORE.getMatchMethod() == DocumentMatchMethod::FILENAME);
-  }
   if (deferred.provider == 2) return ProgressSyncNetwork::binaryDocument(deferred.path);
   return {};
 }
@@ -125,14 +119,14 @@ bool stage(const DeferredProgress& candidate) {
 
 bool pendingForBook(const std::string& path, DeferredProgress& out) {
   const auto& deferred = APP_STATE.deferredProgress;
-  if (!deferred.forBook(path)) return false;
+  if (deferred.provider != 2 || !deferred.forBook(path)) return false;
   out = deferred;
   return true;
 }
 
 std::optional<int> readerSpine(const std::shared_ptr<Epub>& epub) {
   const auto& deferred = APP_STATE.deferredProgress;
-  if (!deferred.forBook(epub->getPath())) return std::nullopt;
+  if (deferred.provider != 2 || !deferred.forBook(epub->getPath())) return std::nullopt;
   if (expectedDocument(deferred) != deferred.document) {
     persistClear();
     return std::nullopt;
@@ -155,7 +149,7 @@ std::optional<int> readerSpine(const std::shared_ptr<Epub>& epub) {
 
 bool applyForBook(const std::string& path, GfxRenderer& renderer) {
   const DeferredProgress deferred = APP_STATE.deferredProgress;
-  if (!deferred.forBook(path) || !FsHelpers::hasEpubExtension(path)) return false;
+  if (deferred.provider != 2 || !deferred.forBook(path) || !FsHelpers::hasEpubExtension(path)) return false;
 
   const std::string document = expectedDocument(deferred);
   if (document.empty() || document != deferred.document) {

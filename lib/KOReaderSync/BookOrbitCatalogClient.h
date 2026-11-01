@@ -84,19 +84,27 @@ class BookOrbitCatalogClient {
     std::string authors;            // joined with ", "; bounded, see BookOrbitCatalogLimits::MAX_AUTHORS_CHARS
     float progressPercent = -1.0f;  // server's progressPercentage 0-100, or -1 when absent
     std::string readStatus;         // display-only, opaque; empty when absent
+    std::string seriesName;         // display-only; empty when the book is in no series
+    std::string seriesIndex;        // server's seriesIndex as display text ("2", "2.5"); empty when absent
   };
 
   /** One page of book listing results. */
   struct BookPage {
     std::vector<BookSummary> items;
     bool hasNext = false;
+    uint32_t total = 0;  // server's total matching books; 0 when not reported
   };
 
-  /** One author or series facet entry (GET .../plugin/catalog/sections/{id}). */
+  /**
+   * One facet entry (GET .../plugin/catalog/sections/{id}). `id` is the value fetchBooks() filters
+   * on: the server's numeric `seriesId` for series (whose entry id is the non-filterable
+   * "series:<n>"), otherwise the entry id itself (author name, library/collection/scope id).
+   */
   struct FacetEntry {
     std::string id;
     std::string title;
     uint32_t bookCount = 0;
+    bool hasBookCount = false;
   };
 
   /** One page of facet listing results. */
@@ -128,6 +136,9 @@ class BookOrbitCatalogClient {
     // is ever sent back. Empty when the server omitted or nulled the field.
     std::string readStatus;
     int rating = -1;  // 0-5 = current star rating; -1 = unrated (server sent null/omitted)
+    float progressPercent = -1.0f;  // server's progressPercentage 0-100, or -1 when absent
+    std::string seriesName;         // display-only; empty when the book is in no series
+    std::string seriesIndex;        // display text, see BookSummary::seriesIndex
   };
 
   /**
@@ -159,6 +170,10 @@ class BookOrbitCatalogClient {
   // pagination this client relies on (hasNext / total items per page) behaves identically to the
   // fork this protocol is adapted from.
   static constexpr int PAGE_SIZE = 20;
+  // Facet pages are sized by the server, not by `size` (authors/series: 60 per page). Every entry
+  // of a page is kept up to the catalog DTO's own page-size maximum, because the next request asks
+  // for the server's next page: dropping the tail of this one would make it unreachable.
+  static constexpr int MAX_FACET_PAGE_ITEMS = 100;
 
   /** Outcome of one fetch-to-file attempt, as reported by a FileFetcher (see below). */
   struct FetchOutcome {

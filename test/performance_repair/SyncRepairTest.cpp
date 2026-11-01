@@ -331,7 +331,7 @@ TEST_F(SyncRepair, SectionMetadataValidatesFinalizationBoundsAndIoFailures) {
 }
 
 TEST(SyncReaderContract, EveryProviderEntryUsesSharedLocalPositionValidation) {
-  for (const std::string path : {"/src/util/KOReaderAutoSync.cpp", "/src/util/BookOrbitAutoSync.cpp"}) {
+  for (const std::string path : {"/src/util/BookOrbitAutoSync.cpp"}) {
     std::ifstream file(std::string(REPO_ROOT) + path);
     const std::string source((std::istreambuf_iterator<char>(file)), {});
     size_t count = 0;
@@ -340,21 +340,27 @@ TEST(SyncReaderContract, EveryProviderEntryUsesSharedLocalPositionValidation) {
       ++count;
       ++offset;
     }
-    EXPECT_EQ(count, path.find("KOReader") != std::string::npos ? 1u : 2u);
+    EXPECT_EQ(count, 2u);
     EXPECT_EQ(source.find("static_cast<float>(pageNumber) / pageCount"), std::string::npos);
-    if (path.find("KOReader") != std::string::npos) {
-      EXPECT_NE(source.find("usesCrossPointSyncServer() && pageCount > 0"), std::string::npos);
-    }
+
   }
 }
 
-TEST_F(SyncRepair, RichChapterStartIgnoresIncompatibleCachedDenominator) {
+TEST_F(SyncRepair, RetiredProviderHandoffIsIgnoredWithoutChangingSavedProgress) {
+  auto candidate = remote();
+  candidate.provider = 1;
+  ASSERT_TRUE(ProgressSyncDeferred::stage(candidate));
+  DeferredProgress out;
+  EXPECT_FALSE(ProgressSyncDeferred::pendingForBook("/book.epub", out));
+  GfxRenderer renderer;
+  EXPECT_FALSE(ProgressSyncDeferred::applyForBook("/book.epub", renderer));
+  EXPECT_EQ(EpubReaderUtils::saves, 0);
+  EXPECT_TRUE(APP_STATE.deferredProgress.valid());
+}
+
+TEST_F(SyncRepair, BookOrbitChapterStartIgnoresIncompatibleCachedDenominator) {
   GfxRenderer renderer;
   auto candidate = remote(true);
-  candidate.provider = 1;
-  candidate.hasRichPosition = true;
-  candidate.richSpineIndex = 1;
-  candidate.richTotalPages = 20;
   Epub::defaultCachedPages = 90;
   Epub::compatibleLayout = false;
   ASSERT_TRUE(ProgressSyncDeferred::stage(candidate));

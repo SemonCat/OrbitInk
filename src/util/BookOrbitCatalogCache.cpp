@@ -14,7 +14,7 @@ namespace {
 
 constexpr char MODULE[] = "BOCache";
 constexpr uint8_t MAGIC[4] = {'B', 'O', 'C', 'C'};
-constexpr uint8_t VERSION = 1;
+constexpr uint8_t VERSION = 2;
 constexpr uint8_t KIND_ROOT = 1;
 constexpr uint8_t KIND_BOOKS = 2;
 // magic(4) version(1) owner(16) kind(1) savedAt(4) hasNext(1) count(2)
@@ -103,14 +103,16 @@ std::string header(const BookOrbitOwnerId& owner, const uint8_t kind, const uint
 
 // Validates checksum + header for `owner`/`kind` and leaves `r` positioned at the first item.
 bool openPayload(const std::string& bytes, const BookOrbitOwnerId& owner, const uint8_t kind, Reader& r, Meta& meta,
-                 bool& hasNext, uint16_t& count) {
+                 bool& hasNext, uint16_t& count, uint8_t* payloadVersion = nullptr) {
   if (bytes.size() < HEADER_BYTES + 1) return false;
   const std::string body = bytes.substr(0, bytes.size() - 1);
   if (checksum(body) != static_cast<uint8_t>(bytes.back())) return false;
   uint8_t magic[4];
   uint8_t version = 0, k = 0, more = 0;
   uint8_t ownerBytes[BookOrbitOwnerId::BYTES];
-  if (!r.bytes(magic, 4) || memcmp(magic, MAGIC, 4) != 0 || !r.u8(version) || version != VERSION) return false;
+  if (!r.bytes(magic, 4) || memcmp(magic, MAGIC, 4) != 0 || !r.u8(version) || version < 1 || version > VERSION)
+    return false;
+  if (payloadVersion) *payloadVersion = version;
   if (!r.bytes(ownerBytes, sizeof(ownerBytes)) || memcmp(ownerBytes, owner.bytes, sizeof(ownerBytes)) != 0) {
     return false;  // another account's cache: never read
   }
@@ -275,12 +277,14 @@ bool Cache::saveBooks(const BookOrbitCatalogClient::BookQuery& query, const Book
                       const uint32_t nowSeconds) {
   if (!enabled() || page.items.size() > MAX_ITEMS) return false;
   std::string bytes = header(owner_, KIND_BOOKS, nowSeconds, page.hasNext, static_cast<uint16_t>(page.items.size()));
+  putU32(bytes, page.total);
   for (const auto& b : page.items) {
     if (!putStr(bytes, b.id) || !putStr(bytes, b.title) || !putStr(bytes, b.authors) || !putStr(bytes, b.readStatus)) {
       return false;
     }
     const int16_t bp = b.progressPercent >= 0.0f ? static_cast<int16_t>(b.progressPercent * 100.0f + 0.5f) : -1;
     putU16(bytes, static_cast<uint16_t>(bp));
+    if (!putStr(bytes, b.seriesName) || !putStr(bytes, b.seriesIndex)) return false;
   }
   bytes.push_back(static_cast<char>(checksum(bytes)));
   const std::string key = queryKey(query);
@@ -296,9 +300,11 @@ bool Cache::loadBooks(const BookOrbitCatalogClient::BookQuery& query, BookOrbitC
   Reader r(bytes);
   bool hasNext = false;
   uint16_t count = 0;
-  if (!openPayload(bytes, owner_, KIND_BOOKS, r, meta, hasNext, count)) return false;
+  uint8_t version = 0;
+  if (!openPayload(bytes, owner_, KIND_BOOKS, r, meta, hasNext, count, &version)) return false;
   BookOrbitCatalogClient::BookPage page;
   page.hasNext = hasNext;
+  if (version >= 2 && !r.u32(page.total)) return false;
   page.items.reserve(count);
   for (uint16_t i = 0; i < count; i++) {
     BookOrbitCatalogClient::BookSummary b;
@@ -306,6 +312,7 @@ bool Cache::loadBooks(const BookOrbitCatalogClient::BookQuery& query, BookOrbitC
     if (!r.str(b.id) || !r.str(b.title) || !r.str(b.authors) || !r.str(b.readStatus) || !r.u16(bp)) return false;
     const int16_t signedBp = static_cast<int16_t>(bp);
     b.progressPercent = signedBp >= 0 ? static_cast<float>(signedBp) / 100.0f : -1.0f;
+    if (version >= 2 && (!r.str(b.seriesName) || !r.str(b.seriesIndex))) return false;
     page.items.push_back(std::move(b));
   }
   out = std::move(page);
